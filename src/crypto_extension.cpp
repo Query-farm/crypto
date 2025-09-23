@@ -9,6 +9,7 @@
 
 // Include the declarations of things from Rust.
 #include "rust.h"
+#include "query_farm_telemetry.hpp"
 
 namespace duckdb
 {
@@ -74,6 +75,8 @@ namespace duckdb
 
         auto crypto_hmac_scalar_function = ScalarFunction("crypto_hmac", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::VARCHAR, CryptoScalarHmacFun);
         loader.RegisterFunction(crypto_hmac_scalar_function);
+
+        QueryFarmSendTelemetry(loader, db, "crypto", "2025092301");
     }
 
     void CryptoExtension::Load(ExtensionLoader &loader)
