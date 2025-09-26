@@ -76,7 +76,7 @@ namespace duckdb
         auto crypto_hmac_scalar_function = ScalarFunction("crypto_hmac", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::VARCHAR, CryptoScalarHmacFun);
         loader.RegisterFunction(crypto_hmac_scalar_function);
 
-        QueryFarmSendTelemetry(loader, db, "crypto", "2025092301");
+        QueryFarmSendTelemetry(loader, loader.GetDatabaseInstance().shared_from_this(), "crypto", "2025092301");
     }
 
     void CryptoExtension::Load(ExtensionLoader &loader)
