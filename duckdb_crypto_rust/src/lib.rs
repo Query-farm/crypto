@@ -9,6 +9,61 @@ use digest::{DynDigest, Mac};
 
 use hmac::SimpleHmac;
 
+// Blake3 wrapper to implement DynDigest trait
+struct Blake3Hasher(blake3::Hasher);
+
+impl Default for Blake3Hasher {
+    fn default() -> Self {
+        Blake3Hasher(blake3::Hasher::new())
+    }
+}
+
+impl DynDigest for Blake3Hasher {
+    fn update(&mut self, data: &[u8]) {
+        self.0.update(data);
+    }
+
+    fn finalize_reset(&mut self) -> Box<[u8]> {
+        let hash = self.0.finalize();
+        self.0.reset();
+        Box::from(hash.as_bytes() as &[u8])
+    }
+
+    fn finalize_into(self, _buf: &mut [u8]) -> Result<(), digest::InvalidBufferSize> {
+        // Blake3 doesn't support finalize_into directly, so we implement it
+        let hash = self.0.finalize();
+        let hash_bytes = hash.as_bytes();
+        if _buf.len() != hash_bytes.len() {
+            return Err(digest::InvalidBufferSize);
+        }
+        _buf.copy_from_slice(hash_bytes);
+        Ok(())
+    }
+
+    fn finalize_into_reset(&mut self, _buf: &mut [u8]) -> Result<(), digest::InvalidBufferSize> {
+        let hash = self.0.finalize();
+        self.0.reset();
+        let hash_bytes = hash.as_bytes();
+        if _buf.len() != hash_bytes.len() {
+            return Err(digest::InvalidBufferSize);
+        }
+        _buf.copy_from_slice(hash_bytes);
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.0.reset();
+    }
+
+    fn output_size(&self) -> usize {
+        32 // BLAKE3 produces 32-byte (256-bit) hashes
+    }
+
+    fn box_clone(&self) -> Box<dyn DynDigest> {
+        Box::new(Blake3Hasher(self.0.clone()))
+    }
+}
+
 macro_rules! make_str {
     ( $s : expr , $len : expr ) => {
         unsafe { str::from_utf8_unchecked(slice::from_raw_parts($s as *const u8, $len)) }
@@ -26,6 +81,8 @@ fn use_hasher(hasher: &mut dyn DynDigest, data: &[u8]) -> Box<[u8]> {
 fn select_hasher(s: &str) -> Option<Box<dyn DynDigest>> {
     match s {
         "blake2b-512" => Some(Box::<blake2::Blake2b512>::default()),
+        "blake3" => None, // Blake3 handled separately due to different API
+        "blake3-hmac" => None, // Blake3 handled separately
         "keccak224" => Some(Box::<sha3::Keccak224>::default()),
         "keccak256" => Some(Box::<sha3::Keccak256>::default()),
         "keccak384" => Some(Box::<sha3::Keccak384>::default()),
@@ -48,6 +105,8 @@ fn select_hasher(s: &str) -> Option<Box<dyn DynDigest>> {
 fn available_hash_algorithms() -> Vec<&'static str> {
     vec![
         "blake2b-512",
+        "blake3",
+        "blake3-hmac",
         "keccak224",
         "keccak256",
         "keccak384",
@@ -87,6 +146,13 @@ pub extern "C" fn hashing_varchar(
 
     let hash_name_str = make_str!(hash_name, hash_name_len);
     let content_slice = unsafe { slice::from_raw_parts(content as *const c_uchar, len) };
+
+    // Handle Blake3 specially since it uses a different API
+    if hash_name_str == "blake3" {
+        let hash = blake3::hash(content_slice);
+        let hex_encoded = base16ct::lower::encode_string(hash.as_bytes());
+        return ResultCString::Ok(create_cstring_with_custom_allocator(&hex_encoded).into_raw());
+    }
 
     match select_hasher(hash_name_str) {
         Some(mut hasher) => {
@@ -139,7 +205,7 @@ pub extern "C" fn hmac_varchar(
     content: *const c_char,
     len: usize,
 ) -> ResultCString {
-    if hash_name.is_null() || content.is_null() {
+    if hash_name.is_null() || key.is_null() || content.is_null() {
         return ResultCString::Ok(ptr::null_mut());
     }
 
@@ -150,6 +216,41 @@ pub extern "C" fn hmac_varchar(
     match hash_name_str {
         "blake2b-512" => {
             make_hmac!(blake2::Blake2b512, key_slice, content_slice)
+        }
+        "blake3" => {
+            // BLAKE3 uses its own keyed hashing mode (faster, recommended)
+            // We convert the key to a fixed 32-byte key
+            let mut key_bytes = [0u8; 32];
+            if key_slice.len() == 32 {
+                key_bytes.copy_from_slice(key_slice);
+            } else {
+                // Hash the key to get a fixed-size key
+                let key_hash = blake3::hash(key_slice);
+                key_bytes.copy_from_slice(key_hash.as_bytes());
+            }
+
+            let mut hasher = blake3::Hasher::new_keyed(&key_bytes);
+            hasher.update(content_slice);
+            let hash = hasher.finalize();
+            let hex_encoded = base16ct::lower::encode_string(hash.as_bytes());
+            ResultCString::Ok(create_cstring_with_custom_allocator(&hex_encoded).into_raw())
+        }
+        "blake3-hmac" => {
+            // Use Blake3 native keyed mode for blake3-hmac as well for consistency
+            let mut key_bytes = [0u8; 32];
+            if key_slice.len() == 32 {
+                key_bytes.copy_from_slice(key_slice);
+            } else {
+                // Hash the key to get a fixed-size key
+                let key_hash = blake3::hash(key_slice);
+                key_bytes.copy_from_slice(key_hash.as_bytes());
+            }
+
+            let mut hasher = blake3::Hasher::new_keyed(&key_bytes);
+            hasher.update(content_slice);
+            let hash = hasher.finalize();
+            let hex_encoded = base16ct::lower::encode_string(hash.as_bytes());
+            ResultCString::Ok(create_cstring_with_custom_allocator(&hex_encoded).into_raw())
         }
         "keccak224" => {
             make_hmac!(sha3::Keccak224, key_slice, content_slice)
@@ -226,7 +327,59 @@ fn create_cstring_with_custom_allocator(s: &str) -> CString {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_blake3_hash_vectors() {
+        // Test empty string
+        let empty = blake3::hash(b"");
+        println!("blake3(''): {}", hex::encode(empty.as_bytes()));
+
+        // Test 'abc'
+        let abc = blake3::hash(b"abc");
+        println!("blake3('abc'): {}", hex::encode(abc.as_bytes()));
+
+        // Test 'hello world'
+        let hello = blake3::hash(b"hello world");
+        println!("blake3('hello world'): {}", hex::encode(hello.as_bytes()));
+    }
+
+    #[test]
+    fn test_blake3_keyed_vectors() {
+        // Test keyed mode with 'key' and 'message'
+        let key_bytes = blake3::hash(b"key"); // Hash key to 32 bytes
+        let mut hasher = blake3::Hasher::new_keyed(key_bytes.as_bytes());
+        hasher.update(b"message");
+        let result = hasher.finalize();
+        println!("blake3_keyed('key', 'message'): {}", hex::encode(result.as_bytes()));
+
+        // Test keyed mode with 'key' and empty message
+        let key_bytes = blake3::hash(b"key");
+        let mut hasher = blake3::Hasher::new_keyed(key_bytes.as_bytes());
+        hasher.update(b"");
+        let result = hasher.finalize();
+        println!("blake3_keyed('key', ''): {}", hex::encode(result.as_bytes()));
+    }
+
+    #[test]
+    fn test_blake3_hmac_vectors() {
+        use hmac::SimpleHmac;
+        use hmac::Mac;
+
+        // Test HMAC with 'key' and 'message'
+        let mut mac = SimpleHmac::<Blake3Hasher>::new_from_slice(b"key").unwrap();
+        mac.update(b"message");
+        let result = mac.finalize();
+        println!("blake3-hmac('key', 'message'): {}", hex::encode(result.into_bytes()));
+
+        // Test HMAC with 'my secret key' and 'test message'
+        let mut mac = SimpleHmac::<Blake3Hasher>::new_from_slice(b"my secret key").unwrap();
+        mac.update(b"test message");
+        let result = mac.finalize();
+        println!("blake3-hmac('my secret key', 'test message'): {}", hex::encode(result.into_bytes()));
+    }
+}
 
 type DuckDBMallocFunctionType = unsafe extern "C" fn(usize) -> *mut ::std::os::raw::c_void;
 type DuckDBFreeFunctionType = unsafe extern "C" fn(*mut c_void);

@@ -26,3 +26,63 @@ query I
 SELECT crypto_hmac('md5', 'test key', 'test message');
 ----
 3e07538991791b125a9c6509f6a9f689
+
+# Test blake2b-512 with 'abc' (RFC 7693 test vector)
+query I
+SELECT crypto_hash('blake2b-512', 'abc');
+----
+ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923
+
+# Test blake2b-512 with empty string
+query I
+SELECT crypto_hash('blake2b-512', '');
+----
+786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce
+
+# Test blake2b-512 HMAC (native keyed mode)
+query I
+SELECT crypto_hmac('blake2b-512', 'key', 'message');
+----
+550d438c7cd4e1861c529cf87c953e28370a62b11df72caf642bdd4b9fbef7997fdfe5db511d51c331260799fc68d4ce15ebe934498a494af9e77d4c88fb3efd
+
+# Test blake3 standard hash with empty string
+query I
+SELECT crypto_hash('blake3', '');
+----
+af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
+
+# Test blake3 standard hash with 'abc'
+query I
+SELECT crypto_hash('blake3', 'abc');
+----
+6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85
+
+# Test blake3 standard hash with longer message
+query I
+SELECT crypto_hash('blake3', 'hello world');
+----
+d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24
+
+# Test blake3 native keyed mode with simple key and message
+query I
+SELECT crypto_hmac('blake3', 'key', 'message');
+----
+55603656ac7bd780db8fece23aad002ee008a605540fe3527a260c4b6e3b2b7e
+
+# Test blake3 native keyed mode with empty message
+query I
+SELECT crypto_hmac('blake3', 'key', '');
+----
+98181cdbb02b50f8a595268916490aba55fc3b06f1523f1c31934f21b250b12b
+
+# Test blake3-hmac (uses same native keyed mode as blake3)
+query I
+SELECT crypto_hmac('blake3-hmac', 'key', 'message');
+----
+55603656ac7bd780db8fece23aad002ee008a605540fe3527a260c4b6e3b2b7e
+
+# Test blake3-hmac with longer key and message
+query I
+SELECT crypto_hmac('blake3-hmac', 'my secret key', 'test message');
+----
+01a02164b6e341733a50b9433b839745c846f188a455c4bf1062a71305d06bd5
