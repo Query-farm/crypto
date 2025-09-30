@@ -13,6 +13,16 @@
 
 namespace duckdb
 {
+    // Helper function to free memory allocated by Rust functions
+    // Both Ok and Err cases allocate memory that must be freed after use
+    // DuckDB's StringVector::AddString copies the string but does NOT take ownership
+    static void FreeResultCString(ResultCString &result) {
+        if (result.tag == ResultCString::Tag::Ok && result.ok._0 != nullptr) {
+            duckdb_free(result.ok._0);
+        } else if (result.tag == ResultCString::Tag::Err && result.err._0 != nullptr) {
+            duckdb_free(result.err._0);
+        }
+    }
 
     inline void CryptoScalarHashFun(DataChunk &args, ExpressionState &state, Vector &result)
     {
@@ -23,14 +33,20 @@ namespace duckdb
             hash_name_vector, value_vector, result, args.size(),
             [&](string_t hash_name, string_t value)
             {
-                // AddString will retain the pointer, but really Rust allocated the string.
+                // Call Rust function - this allocates memory that we must free
                 auto hash_result = hashing_varchar(hash_name.GetData(), hash_name.GetSize(), value.GetData(), value.GetSize());
+
                 if (hash_result.tag == ResultCString::Tag::Err)
                 {
-                    throw InvalidInputException(hash_result.err._0);
+                    // Copy error message before freeing Rust memory
+                    std::string error_msg(hash_result.err._0);
+                    FreeResultCString(hash_result);
+                    throw InvalidInputException(error_msg);
                 }
 
+                // Copy string to DuckDB memory, then free Rust memory
                 auto output = StringVector::AddString(result, hash_result.ok._0);
+                FreeResultCString(hash_result);
                 return output;
             });
     }
@@ -51,16 +67,22 @@ namespace duckdb
             hash_function_name_vector, key_vector, value_vector, result, args.size(),
             [&](string_t hash_function_name, string_t key, string_t value)
             {
-                // AddString will retain the pointer, but really Rust allocated the string.
+                // Call Rust function - this allocates memory that we must free
                 auto hmac_result = hmac_varchar(hash_function_name.GetData(), hash_function_name.GetSize(),
                                                 key.GetData(), key.GetSize(),
                                                 value.GetData(), value.GetSize());
+
                 if (hmac_result.tag == ResultCString::Tag::Err)
                 {
-                    throw InvalidInputException(hmac_result.err._0);
+                    // Copy error message before freeing Rust memory
+                    std::string error_msg(hmac_result.err._0);
+                    FreeResultCString(hmac_result);
+                    throw InvalidInputException(error_msg);
                 }
 
+                // Copy string to DuckDB memory, then free Rust memory
                 auto output = StringVector::AddString(result, hmac_result.ok._0);
+                FreeResultCString(hmac_result);
                 return output;
             });
     }
@@ -76,7 +98,7 @@ namespace duckdb
         auto crypto_hmac_scalar_function = ScalarFunction("crypto_hmac", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::VARCHAR, CryptoScalarHmacFun);
         loader.RegisterFunction(crypto_hmac_scalar_function);
 
-        QueryFarmSendTelemetry(loader, "crypto", "2025092301");
+        // QueryFarmSendTelemetry(loader, "crypto", "2025092301"); // Disabled for DuckDB 1.4.0 compatibility
     }
 
     void CryptoExtension::Load(ExtensionLoader &loader)
