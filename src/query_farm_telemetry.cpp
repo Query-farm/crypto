@@ -79,17 +79,19 @@ namespace duckdb
 		auto result_obj = yyjson_mut_obj(doc);
 		yyjson_mut_doc_set_root(doc, result_obj);
 
+		auto platform = DuckDB::Platform();
+
 		yyjson_mut_obj_add_str(doc, result_obj, "extension_name", extension_name.c_str());
 		yyjson_mut_obj_add_str(doc, result_obj, "extension_version", extension_version.c_str());
-		yyjson_mut_obj_add_str(doc, result_obj, "user_agent", "query-farm/20250926");
-		yyjson_mut_obj_add_str(doc, result_obj, "duckdb_platform", DuckDB::Platform().c_str());
+		yyjson_mut_obj_add_str(doc, result_obj, "user_agent", "query-farm/20250927");
+		yyjson_mut_obj_add_str(doc, result_obj, "duckdb_platform", platform.c_str());
 		yyjson_mut_obj_add_str(doc, result_obj, "duckdb_library_version", DuckDB::LibraryVersion());
 		yyjson_mut_obj_add_str(doc, result_obj, "duckdb_release_codename", DuckDB::ReleaseCodename());
 		yyjson_mut_obj_add_str(doc, result_obj, "duckdb_source_id", DuckDB::SourceID());
 
 		size_t telemetry_len;
 		auto telemetry_data =
-				yyjson_mut_val_write_opts(result_obj, YYJSON_WRITE_ALLOW_INF_AND_NAN, NULL, &telemetry_len, nullptr);
+				yyjson_mut_val_write_opts(result_obj, 0, NULL, &telemetry_len, nullptr);
 
 		if (telemetry_data == nullptr)
 		{
