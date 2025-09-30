@@ -26,3 +26,8 @@ query I
 SELECT crypto_hmac('md5', 'test key', 'test message');
 ----
 3e07538991791b125a9c6509f6a9f689
+
+query I
+select count(case when crypto_hmac('md5', 'foo', random()::varchar) is not null then 1 else 0 end) from range(1000000)
+----
+1000000

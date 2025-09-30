@@ -27,10 +27,12 @@ namespace duckdb
                 auto hash_result = hashing_varchar(hash_name.GetData(), hash_name.GetSize(), value.GetData(), value.GetSize());
                 if (hash_result.tag == ResultCString::Tag::Err)
                 {
-                    throw InvalidInputException(hash_result.err._0);
+                    string error_message = string(hash_result.err._0);
+                    throw InvalidInputException(error_message);
                 }
 
                 auto output = StringVector::AddString(result, hash_result.ok._0);
+                duckdb_free(hash_result.ok._0);
                 return output;
             });
     }
@@ -57,10 +59,12 @@ namespace duckdb
                                                 value.GetData(), value.GetSize());
                 if (hmac_result.tag == ResultCString::Tag::Err)
                 {
-                    throw InvalidInputException(hmac_result.err._0);
+                    string error_message = string(hmac_result.err._0);
+                    throw InvalidInputException(error_message);
                 }
 
                 auto output = StringVector::AddString(result, hmac_result.ok._0);
+                duckdb_free(hmac_result.ok._0);
                 return output;
             });
     }
