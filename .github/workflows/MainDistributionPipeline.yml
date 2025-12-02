@@ -21,5 +21,4 @@ jobs:
       duckdb_version: v1.4-andium
       ci_tools_version: main
       extension_name: crypto
-      enable_rust: true
-      exclude_archs: "windows_amd64_rtools;windows_amd64_mingw"
+      exclude_archs: "wasm_mvp;wasm_eh;wasm_threads;"
