@@ -11,19 +11,19 @@ Catalog Error: Scalar Function with name crypto_hash does not exist!
 # Require statement will ensure this test is run with this extension loaded
 require crypto
 
-# Confirm the extension works
+# Confirm the extension works - returns BLOBs that can be converted to hex
 query I
-SELECT crypto_hash('sha2-256', 'abc');
+SELECT lower(to_hex(crypto_hash('sha2-256', 'abc')));
 ----
 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
 
 query I
-SELECT crypto_hash('md5', 'test');
+SELECT lower(to_hex(crypto_hash('md5', 'test')));
 ----
 098f6bcd4621d373cade4e832627b4f6
 
 query I
-SELECT crypto_hmac('md5', 'test key', 'test message');
+SELECT lower(to_hex(crypto_hmac('md5', 'test key', 'test message')));
 ----
 3e07538991791b125a9c6509f6a9f689
 
@@ -31,3 +31,1010 @@ query I
 select count(case when crypto_hmac('md5', 'foo', random()::varchar) is not null then 1 else 0 end) from range(1000000)
 ----
 1000000
+
+# Test all SHA2 variants with known test vectors
+query I
+SELECT lower(to_hex(crypto_hash('sha2-224', 'abc')));
+----
+23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7
+
+query I
+SELECT lower(to_hex(crypto_hash('sha2-384', 'abc')));
+----
+cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7
+
+query I
+SELECT lower(to_hex(crypto_hash('sha2-512', 'abc')));
+----
+ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f
+
+# Test SHA3 variants with known test vectors
+query I
+SELECT lower(to_hex(crypto_hash('sha3-224', 'abc')));
+----
+e642824c3f8cf24ad09234ee7d3c766fc9a3a5168d0c94ad73b46fdf
+
+query I
+SELECT lower(to_hex(crypto_hash('sha3-256', 'abc')));
+----
+3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532
+
+query I
+SELECT lower(to_hex(crypto_hash('sha3-384', 'abc')));
+----
+ec01498288516fc926459f58e2c6ad8df9b473cb0fc08c2596da7cf0e49be4b298d88cea927ac7f539f1edf228376d25
+
+query I
+SELECT lower(to_hex(crypto_hash('sha3-512', 'abc')));
+----
+b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0
+
+# Test Blake2b-512 with known test vector
+query I
+SELECT lower(to_hex(crypto_hash('blake2b-512', 'abc')));
+----
+ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923
+
+# Test Blake3 with known test vector
+query I
+SELECT lower(to_hex(crypto_hash('blake3', 'abc')));
+----
+6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85
+
+# Test SHA1 with known test vector
+query I
+SELECT lower(to_hex(crypto_hash('sha1', 'abc')));
+----
+a9993e364706816aba3e25717850c26c9cd0d89d
+
+# Note: MD4 is deprecated and often disabled in modern OpenSSL builds, so we skip testing it
+
+# Test Keccak variants (note: these map to SHA3 in OpenSSL)
+query I
+SELECT lower(to_hex(crypto_hash('keccak224', 'abc')));
+----
+e642824c3f8cf24ad09234ee7d3c766fc9a3a5168d0c94ad73b46fdf
+
+query I
+SELECT lower(to_hex(crypto_hash('keccak256', 'abc')));
+----
+3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532
+
+query I
+SELECT lower(to_hex(crypto_hash('keccak384', 'abc')));
+----
+ec01498288516fc926459f58e2c6ad8df9b473cb0fc08c2596da7cf0e49be4b298d88cea927ac7f539f1edf228376d25
+
+query I
+SELECT lower(to_hex(crypto_hash('keccak512', 'abc')));
+----
+b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0
+
+# Test empty string input
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', '')));
+----
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+query I
+SELECT lower(to_hex(crypto_hash('md5', '')));
+----
+d41d8cd98f00b204e9800998ecf8427e
+
+# Test longer input
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 'abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq')));
+----
+248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+
+# Test Unicode input
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', '你好世界')));
+----
+beca6335b20ff57ccc47403ef4d9e0b8fccb4442b3151c2e7d50050673d43172
+
+# Test binary-like data with null bytes in SQL string
+query I
+SELECT octet_length(crypto_hash('sha2-256', 'test' || chr(0) || 'data'));
+----
+32
+
+# Error case: invalid algorithm name
+statement error
+SELECT crypto_hash('invalid-algorithm', 'test');
+----
+Invalid Input Error: Invalid hash algorithm 'invalid-algorithm'
+
+statement error
+SELECT crypto_hash('SHA256', 'test');
+----
+Invalid Input Error: Invalid hash algorithm 'sha256'
+
+# Test HMAC with different algorithms - SHA2 variants
+query I
+SELECT lower(to_hex(crypto_hmac('sha2-256', 'key', 'The quick brown fox jumps over the lazy dog')));
+----
+f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8
+
+query I
+SELECT lower(to_hex(crypto_hmac('sha2-512', 'key', 'The quick brown fox jumps over the lazy dog')));
+----
+b42af09057bac1e2d41708e48a902e09b5ff7f12ab428a4fe86653c73dd248fb82f948a549f7b791a5b41915ee4d1ec3935357e4e2317250d0372afa2ebeeb3a
+
+# Test HMAC with SHA3
+query I
+SELECT lower(to_hex(crypto_hmac('sha3-256', 'key', 'message')));
+----
+0f43852a24d5597a8200312a95993991581679d63264f1b1ad4b5ccac7fe8ba4
+
+# Test HMAC with Blake2b (verify it produces correct length output)
+query I
+SELECT octet_length(crypto_hmac('blake2b-512', 'key', 'message'));
+----
+64
+
+# Test HMAC with empty key
+query I
+SELECT lower(to_hex(crypto_hmac('sha2-256', '', 'message')));
+----
+eb08c1f56d5ddee07f7bdf80468083da06b64cf4fac64fe3a90883df5feacae4
+
+# Test HMAC with empty message
+query I
+SELECT lower(to_hex(crypto_hmac('sha2-256', 'key', '')));
+----
+5d5d139563c95b5967b9bd9a8c9b233a9dedb45072794cd232dc1b74832607d0
+
+# Test HMAC with both empty
+query I
+SELECT lower(to_hex(crypto_hmac('sha2-256', '', '')));
+----
+b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad
+
+# Test very long input (1000 'a's)
+query I
+SELECT octet_length(crypto_hash('sha2-256', repeat('a', 1000)));
+----
+32
+
+# Test that different inputs produce different outputs
+query I
+SELECT crypto_hash('sha2-256', 'test1') != crypto_hash('sha2-256', 'test2');
+----
+true
+
+# Test case sensitivity
+query I
+SELECT crypto_hash('sha2-256', 'Test') != crypto_hash('sha2-256', 'test');
+----
+true
+
+# Test HMAC error case: invalid algorithm
+statement error
+SELECT crypto_hmac('invalid-algo', 'key', 'message');
+----
+Invalid Input Error: Invalid hash algorithm 'invalid-algo'
+
+# Test crypto_hash with different input types (new functionality)
+# ================================================================
+
+# Test with INTEGER type
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 42::INTEGER)));
+----
+e8a4b2ee7ede79a3afb332b5b6cc3d952a65fd8cffb897f5d18016577c33d7cc
+
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', -42::INTEGER)));
+----
+235162da3267cdb3e2a4791547973fa7ba7b8bf84e7841d998325fab5ab9516b
+
+# Test with BIGINT type
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 9223372036854775807::BIGINT)));
+----
+6a69a6cc7473a16302890cd2a9e93e347281f6ea0e1bb784e589753bed0b3324
+
+# Test with SMALLINT type
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 100::SMALLINT)));
+----
+4658d6abbbaf7748c172ed5a3e003cdb8997648f88724834e41f75e54520e142
+
+# Test with TINYINT type
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 10::TINYINT)));
+----
+01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
+
+# Test with HUGEINT type
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 12345678901234567890::HUGEINT)));
+----
+23926eebf0255a2dc17915ae0d3c60e800e05021aadbf53093c46f5cacca9de1
+
+# Test with unsigned integer types
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 255::UTINYINT)));
+----
+a8100ae6aa1940d0b663bb31cd466142ebbdbd5187131b92d93818987832eb89
+
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 65535::USMALLINT)));
+----
+ca2fd00fa001190744c15c317643ab092e7048ce086a243e2be9437c898de1bb
+
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 4294967295::UINTEGER)));
+----
+ad95131bc0b799c0b1af477fb14fcf26a6a9f76079e48bf090acb7e8367bfd0e
+
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 18446744073709551615::UBIGINT)));
+----
+12a3ae445661ce5dee78d0650d33362dec29c4f82af05e7e57fb595bbbacf0ca
+
+# Test with FLOAT type
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 3.14::FLOAT)));
+----
+092bd4485f9e14e48dc36efd1a1696bee67a76f8e7454f5db63bbd65912f00ab
+
+# Test with DOUBLE type
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 3.141592653589793::DOUBLE)));
+----
+8b5319c77d1df2dcfcc3c1d94ab549a29d2b8b9f61372dc803146cbb1d2800b9
+
+# Test with BOOLEAN type
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', true::BOOLEAN)));
+----
+4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a
+
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', false::BOOLEAN)));
+----
+6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d
+
+# Test with DATE type
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', DATE '2024-01-01')));
+----
+752ed8112bbf32523d247ee687df0b64548922e9109e6ba73b66d6b3df0a906c
+
+# Test with TIME type
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', TIME '12:30:45')));
+----
+18bba019ec5386f6878207077ce5d20ecd5ebf04de3611906304ca31c1697a6f
+
+# Test with TIMESTAMP type
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', TIMESTAMP '2024-01-01 12:00:00')));
+----
+17d836195a05b117e0c249c3d365e22f3e3d31ae80e50245efa7e245daa518f5
+
+# Test with UUID type
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', UUID '550e8400-e29b-41d4-a716-446655440000')));
+----
+9061bd82032ce8cda67b72e44b0cde0e5c35e89b15dabf765ed50b4670c190d1
+
+# Test with BLOB type (should still work)
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', '\x48656c6c6f'::BLOB)));
+----
+d95dc912c79c0dfeff6aeca9cd7df524e8cd16ce1db9b83e1ab32b29883a7f52
+
+# Test that same integer value produces same hash
+query I
+SELECT crypto_hash('sha2-256', 42::INTEGER) = crypto_hash('sha2-256', 42::INTEGER);
+----
+true
+
+# Test that different integer types with same value produce different hashes (different binary representations)
+query I
+SELECT crypto_hash('sha2-256', 42::INTEGER) != crypto_hash('sha2-256', 42::BIGINT);
+----
+true
+
+# Test that different types produce different hashes
+query I
+SELECT crypto_hash('sha2-256', 1::INTEGER) != crypto_hash('sha2-256', 1.0::DOUBLE);
+----
+true
+
+# Test with NULL values
+query I
+SELECT crypto_hash('sha2-256', NULL::INTEGER) IS NULL;
+----
+true
+
+query I
+SELECT crypto_hash('sha2-256', NULL::VARCHAR) IS NULL;
+----
+true
+
+# Test with zero values of different types
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 0::INTEGER)));
+----
+df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119
+
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 0::BIGINT)));
+----
+af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc
+
+# Test that VARCHAR still works as before (backward compatibility)
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 'test')));
+----
+9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+
+# Test unsupported types raise errors
+# ====================================
+
+# MAP type should raise an error
+statement error
+SELECT crypto_hash('sha2-256', MAP([1, 2], ['a', 'b']));
+----
+Invalid Input Error: Unsupported type for crypto_hash
+
+# STRUCT type should raise an error
+statement error
+SELECT crypto_hash('sha2-256', {'x': 1, 'y': 2});
+----
+Invalid Input Error: Unsupported type for crypto_hash
+
+# Test LIST type support
+# =======================
+
+# Test list of integers (fixed-length type)
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', [1, 2, 3, 4, 5]::INTEGER[])));
+----
+4f6addc9659d6fb90fe94b6688a79f2a1fa8d36ec43f8f3e1d9b6528c448a384
+
+# Test list of VARCHAR (with length + content hashing)
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', ['hello', 'world']::VARCHAR[])));
+----
+306a0d104017a29193be6c7464b1fd5ee65495353a7ccad7dd2928e5fb9731fd
+
+# Test list of BLOB
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', ['\x01\x02'::BLOB, '\x03\x04'::BLOB])));
+----
+2246528180fc63d5876af3e5f1ce344027e38471a9bdfe9ebbe4cb1eaacc6a29
+
+# Test empty list
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', []::INTEGER[])));
+----
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+# Test list with NULL elements (integers)
+statement error
+SELECT lower(to_hex(crypto_hash('sha2-256', [1, NULL, 3]::INTEGER[])));
+----
+Unsupported type for crypto_hash: NULL elements inside lists are not supported
+
+# Test list with NULL elements (VARCHAR)
+statement error
+SELECT lower(to_hex(crypto_hash('sha2-256', ['a', NULL, 'c']::VARCHAR[])));
+----
+Unsupported type for crypto_hash: NULL elements inside lists are not supported
+
+# Test list of BIGINT
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', [100, 200, 300]::BIGINT[])));
+----
+3ccca3e789e8fc4557e1cf512fc986f886cee39d6c19d8263427196d1d86a8b9
+
+# Test list of BOOLEAN
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', [true, false, true]::BOOLEAN[])));
+----
+85f90dfea1d8027e1463e5ca971a250110a20df0119d204a74220bc63516d15b
+
+# Test list of DOUBLE
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', [1.5, 2.5, 3.5]::DOUBLE[])));
+----
+ad1461355d664226df0a9dd36082ce06afa03d52a19beb8e90853216ef6b221e
+
+# Test that same list produces same hash
+query I
+SELECT crypto_hash('sha2-256', [1, 2, 3]::INTEGER[]) = crypto_hash('sha2-256', [1, 2, 3]::INTEGER[]);
+----
+true
+
+# Test that different lists produce different hashes
+query I
+SELECT crypto_hash('sha2-256', [1, 2, 3]::INTEGER[]) != crypto_hash('sha2-256', [1, 2, 4]::INTEGER[]);
+----
+true
+
+# Test that order matters
+query I
+SELECT crypto_hash('sha2-256', [1, 2, 3]::INTEGER[]) != crypto_hash('sha2-256', [3, 2, 1]::INTEGER[]);
+----
+true
+
+# Test that VARCHAR list with different lengths produces different hashes
+query I
+SELECT crypto_hash('sha2-256', ['a', 'bb']::VARCHAR[]) != crypto_hash('sha2-256', ['a', 'b']::VARCHAR[]);
+----
+true
+
+# Test list with single element
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', [42]::INTEGER[])));
+----
+e8a4b2ee7ede79a3afb332b5b6cc3d952a65fd8cffb897f5d18016577c33d7cc
+
+# Test list of DATE
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', [DATE '2024-01-01', DATE '2024-01-02']::DATE[])));
+----
+6d8afee8edb2162ad8851d239753b11fde27c703b8875d32efba887dcc660927
+
+# Test nested list errors
+# ========================
+
+# List of lists should raise an error
+statement error
+SELECT crypto_hash('sha2-256', [[1, 2], [3, 4]]::INTEGER[][]);
+----
+Invalid Input Error: Unsupported type for crypto_hash: nested types inside of lists are not supported
+
+# List of structs should raise an error
+statement error
+SELECT crypto_hash('sha2-256', [{'x': 1}, {'x': 2}]);
+----
+Invalid Input Error: Unsupported type for crypto_hash: nested types inside of lists are not supported
+
+# List of maps should raise an error
+statement error
+SELECT crypto_hash('sha2-256', [MAP([1], ['a']), MAP([2], ['b'])]);
+----
+Invalid Input Error: Unsupported type for crypto_hash: nested types inside of lists are not supported
+
+# Blake3-specific tests with all supported data types
+# ====================================================
+
+# Test Blake3 with empty string
+query I
+SELECT lower(to_hex(crypto_hash('blake3', '')));
+----
+af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
+
+# Test Blake3 with longer input
+query I
+SELECT lower(to_hex(crypto_hash('blake3', 'abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq')));
+----
+c19012cc2aaf0dc3d8e5c45a1b79114d2df42abb2a410bf54be09e891af06ff8
+
+# Test Blake3 with Unicode input
+query I
+SELECT lower(to_hex(crypto_hash('blake3', '你好世界')));
+----
+43198a190cbfb992c88864ef5185451d88843819089a3a1d461ea22f18fba4dc
+
+# Test Blake3 output length (should be 32 bytes)
+query I
+SELECT octet_length(crypto_hash('blake3', 'test'));
+----
+32
+
+# Test Blake3 with INTEGER type
+query I
+SELECT lower(to_hex(crypto_hash('blake3', 42::INTEGER)));
+----
+95dbc3244503309f26dee9436b39568cc80b0cbe17ef409e9273c4edb58653fd
+
+# Test Blake3 with BIGINT type
+query I
+SELECT lower(to_hex(crypto_hash('blake3', 9223372036854775807::BIGINT)));
+----
+bf154146354ad334e63867972400baf6a64c19a15f46db3bea307060fa0fa435
+
+# Test Blake3 with SMALLINT type
+query I
+SELECT lower(to_hex(crypto_hash('blake3', 100::SMALLINT)));
+----
+d9dba825ecc31a0edc64d04c8535c66a73bc3e74c4c48df84da3272949e38f01
+
+# Test Blake3 with TINYINT type
+query I
+SELECT lower(to_hex(crypto_hash('blake3', 10::TINYINT)));
+----
+295192ea1ec8566d563b1a7587e5f0198580cdbd043842f5090a4c197c20c67a
+
+# Test Blake3 with HUGEINT type
+query I
+SELECT lower(to_hex(crypto_hash('blake3', 12345678901234567890::HUGEINT)));
+----
+79d62bd522589d5d17b7ad4ae351c42129296cc8789691e21a7b601a85417953
+
+# Test Blake3 with unsigned integer types
+query I
+SELECT lower(to_hex(crypto_hash('blake3', 255::UTINYINT)));
+----
+99d44d377bc5936d8cb7f5df90713d84c7587739b4724d3d2f9af1ee0e4c8efd
+
+query I
+SELECT lower(to_hex(crypto_hash('blake3', 65535::USMALLINT)));
+----
+a77c906127855183698bad218d6abe2d817424b54b079a74b7f22ac1af379475
+
+query I
+SELECT lower(to_hex(crypto_hash('blake3', 4294967295::UINTEGER)));
+----
+650e93bacca01942a5a787f2f3ec4ce560998eb7c250733601a880d7f0c11178
+
+query I
+SELECT lower(to_hex(crypto_hash('blake3', 18446744073709551615::UBIGINT)));
+----
+73919af90e1fee9f2c6585e4534a6fa9e04931c0090b9c7ab9e631b16d8c8da0
+
+# Test Blake3 with FLOAT type
+query I
+SELECT lower(to_hex(crypto_hash('blake3', 3.14::FLOAT)));
+----
+2b7e8c41292a951ec1f5d3040f5d096facbbf755472b190a8fab3d424394e946
+
+# Test Blake3 with DOUBLE type
+query I
+SELECT lower(to_hex(crypto_hash('blake3', 3.141592653589793::DOUBLE)));
+----
+71701e43b7b7c140e04ec34c91a7f33fa85b7ac991b80ed00cf112a7e72f8436
+
+# Test Blake3 with BOOLEAN type
+query I
+SELECT lower(to_hex(crypto_hash('blake3', true::BOOLEAN)));
+----
+48fc721fbbc172e0925fa27af1671de225ba927134802998b10a1568a188652b
+
+query I
+SELECT lower(to_hex(crypto_hash('blake3', false::BOOLEAN)));
+----
+2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213
+
+# Test Blake3 with DATE type
+query I
+SELECT lower(to_hex(crypto_hash('blake3', DATE '2024-01-01')));
+----
+5e4b2880712b2a27c907962e878451458dc8eccf4e5135cce7bd3e254b115110
+
+# Test Blake3 with TIME type
+query I
+SELECT lower(to_hex(crypto_hash('blake3', TIME '12:30:45')));
+----
+d4cdd1fa12f40ee8c28a47c56a44cf793c71858df58bc685af76c41423c079c5
+
+# Test Blake3 with TIMESTAMP type
+query I
+SELECT lower(to_hex(crypto_hash('blake3', TIMESTAMP '2024-01-01 12:00:00')));
+----
+0131486721519beb47a0f02270d0318c4d03bc2f0cc8841b6bd70ef03008a21f
+
+# Test Blake3 with UUID type
+query I
+SELECT lower(to_hex(crypto_hash('blake3', UUID '550e8400-e29b-41d4-a716-446655440000')));
+----
+14fb70679b3e5ef7761b8b98fdc345d22f7752eae43457ef423de747798f8ed8
+
+# Test Blake3 with BLOB type
+query I
+SELECT lower(to_hex(crypto_hash('blake3', '\x48656c6c6f'::BLOB)));
+----
+b90aefe89f8990c6d44d0929b2848c98b0689630ed7301d361adcb1b0f467e26
+
+# Test Blake3 with VARCHAR (backward compatibility)
+query I
+SELECT lower(to_hex(crypto_hash('blake3', 'test')));
+----
+4878ca0425c739fa427f7eda20fe845f6b2e46ba5fe2a14df5b1e32f50603215
+
+# Test Blake3 with NULL values
+query I
+SELECT crypto_hash('blake3', NULL::INTEGER) IS NULL;
+----
+true
+
+query I
+SELECT crypto_hash('blake3', NULL::VARCHAR) IS NULL;
+----
+true
+
+# Test Blake3 with zero values of different types
+query I
+SELECT lower(to_hex(crypto_hash('blake3', 0::INTEGER)));
+----
+ec2bd03bf86b935fa34d71ad7ebb049f1f10f87d343e521511d8f9e6625620cd
+
+query I
+SELECT lower(to_hex(crypto_hash('blake3', 0::BIGINT)));
+----
+71e0a99173564931c0b8acc52d2685a8e39c64dc52e3d02390fdac2a12b155cb
+
+# Test Blake3 that same value produces same hash
+query I
+SELECT crypto_hash('blake3', 42::INTEGER) = crypto_hash('blake3', 42::INTEGER);
+----
+true
+
+# Test Blake3 that different types produce different hashes
+query I
+SELECT crypto_hash('blake3', 42::INTEGER) != crypto_hash('blake3', 42::BIGINT);
+----
+true
+
+query I
+SELECT crypto_hash('blake3', 1::INTEGER) != crypto_hash('blake3', 1.0::DOUBLE);
+----
+true
+
+# Test Blake3 with LIST types
+# ===========================
+
+# Test Blake3 with list of integers
+query I
+SELECT lower(to_hex(crypto_hash('blake3', [1, 2, 3, 4, 5]::INTEGER[])));
+----
+e1ab5416e654193551c8ef929d39d23976b5123bea86538db46824cb1048d59c
+
+# Test Blake3 with list of VARCHAR
+query I
+SELECT lower(to_hex(crypto_hash('blake3', ['hello', 'world']::VARCHAR[])));
+----
+7f77806343e37695f1806731c24587a914689365ecdecb10ae4f4fdb7f870e87
+
+# Test Blake3 with list of BLOB
+query I
+SELECT lower(to_hex(crypto_hash('blake3', ['\x01\x02'::BLOB, '\x03\x04'::BLOB])));
+----
+3f18add6edf2ddf5e531185ac4a7edc4076106b4bd3bbf4609e31ab853c7730a
+
+# Test Blake3 with empty list
+query I
+SELECT lower(to_hex(crypto_hash('blake3', []::INTEGER[])));
+----
+af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
+
+# Test Blake3 with list with NULL elements (integers)
+statement error
+SELECT lower(to_hex(crypto_hash('blake3', [1, NULL, 3]::INTEGER[])));
+----
+Unsupported type for crypto_hash: NULL elements inside lists are not supported
+
+# Test Blake3 with list with NULL elements (VARCHAR)
+statement error
+SELECT lower(to_hex(crypto_hash('blake3', ['a', NULL, 'c']::VARCHAR[])));
+----
+Unsupported type for crypto_hash: NULL elements inside lists are not supported
+
+# Test Blake3 with list of BIGINT
+query I
+SELECT lower(to_hex(crypto_hash('blake3', [100, 200, 300]::BIGINT[])));
+----
+ca595058b52e58466bb782630125a71594a6042f99d7f4daac3eace0667ffc6c
+
+# Test Blake3 with list of BOOLEAN
+query I
+SELECT lower(to_hex(crypto_hash('blake3', [true, false, true]::BOOLEAN[])));
+----
+12056c7c1a2ba15ffa2b43d4574bd1766f17cef0aa88d6bbbb204d6774385a61
+
+# Test Blake3 with list of DOUBLE
+query I
+SELECT lower(to_hex(crypto_hash('blake3', [1.5, 2.5, 3.5]::DOUBLE[])));
+----
+e192145ceebfb63aafddd82d82bd93e494990a5922ed4cd735390c845de29d78
+
+# Test Blake3 that same list produces same hash
+query I
+SELECT crypto_hash('blake3', [1, 2, 3]::INTEGER[]) = crypto_hash('blake3', [1, 2, 3]::INTEGER[]);
+----
+true
+
+# Test Blake3 that different lists produce different hashes
+query I
+SELECT crypto_hash('blake3', [1, 2, 3]::INTEGER[]) != crypto_hash('blake3', [1, 2, 4]::INTEGER[]);
+----
+true
+
+# Test Blake3 that order matters
+query I
+SELECT crypto_hash('blake3', [1, 2, 3]::INTEGER[]) != crypto_hash('blake3', [3, 2, 1]::INTEGER[]);
+----
+true
+
+# Test Blake3 with list of DATE
+query I
+SELECT lower(to_hex(crypto_hash('blake3', [DATE '2024-01-01', DATE '2024-01-02']::DATE[])));
+----
+a2e1b806a6c436d6153825aacd15170af847d03acac3e48ead86e5161584c179
+
+# Test Blake3 with single element list
+query I
+SELECT lower(to_hex(crypto_hash('blake3', [42]::INTEGER[])));
+----
+95dbc3244503309f26dee9436b39568cc80b0cbe17ef409e9273c4edb58653fd
+
+# Test Blake3 HMAC functionality
+# ===============================
+
+# Test Blake3 HMAC with 32-byte key (required for Blake3 keyed mode)
+query I
+SELECT octet_length(crypto_hmac('blake3', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'message'));
+----
+32
+
+# Test Blake3 different keys produce different HMACs
+query I
+SELECT crypto_hmac('blake3', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'message') != crypto_hmac('blake3', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'message');
+----
+true
+
+# Test Blake3 different messages produce different HMACs
+query I
+SELECT crypto_hmac('blake3', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'message1') != crypto_hmac('blake3', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'message2');
+----
+true
+
+# Test Blake3 HMAC with key that's too short
+statement error
+SELECT crypto_hmac('blake3', 'short', 'message');
+----
+Invalid Input Error: Blake3 keyed mode requires a key of exactly 32 bytes
+
+# Test Blake3 HMAC with key that's too long
+statement error
+SELECT crypto_hmac('blake3', 'this_is_a_key_that_is_longer_than_32_bytes', 'message');
+----
+Invalid Input Error: Blake3 keyed mode requires a key of exactly 32 bytes
+
+# Test crypto_hash_agg() - Aggregate hash function
+# ==================================================
+
+# Test basic aggregate with VARCHAR data
+query I
+SELECT lower(to_hex(crypto_hash_agg('sha2-256', data ORDER BY data)))
+FROM (VALUES ('a'), ('b'), ('c')) t(data);
+----
+3d10f2e96612f8284bd5233f0c75d6283331be5afd353c22cfacb4872685a972
+
+# Test aggregate with Blake3
+query I
+SELECT lower(to_hex(crypto_hash_agg('blake3', data ORDER BY data)))
+FROM (VALUES ('hello'), ('world')) t(data);
+----
+7f77806343e37695f1806731c24587a914689365ecdecb10ae4f4fdb7f870e87
+
+# Test aggregate with INTEGER data
+query I
+SELECT lower(to_hex(crypto_hash_agg('sha2-256', value ORDER BY value)))
+FROM (VALUES (1), (2), (3), (4), (5)) t(value);
+----
+4f6addc9659d6fb90fe94b6688a79f2a1fa8d36ec43f8f3e1d9b6528c448a384
+
+# Test aggregate with BIGINT data
+query I
+SELECT lower(to_hex(crypto_hash_agg('sha2-256', value ORDER BY value)))
+FROM (VALUES (100::BIGINT), (200::BIGINT), (300::BIGINT)) t(value);
+----
+3ccca3e789e8fc4557e1cf512fc986f886cee39d6c19d8263427196d1d86a8b9
+
+# Test aggregate with DOUBLE data
+query I
+SELECT lower(to_hex(crypto_hash_agg('sha2-256', value ORDER BY value)))
+FROM (VALUES (1.5), (2.5), (3.5)) t(value);
+----
+ad1461355d664226df0a9dd36082ce06afa03d52a19beb8e90853216ef6b221e
+
+# Test aggregate with single row
+query I
+SELECT lower(to_hex(crypto_hash_agg('sha2-256', data ORDER BY data)))
+FROM (VALUES ('single')) t(data);
+----
+c978cff530192ee11598c992ae43b9192c9c8432d0fc12243e9a675cc587218a
+
+# Test aggregate with empty result set
+query I
+SELECT crypto_hash_agg('sha2-256', data ORDER BY data)
+FROM (SELECT 'x' WHERE false) t(data);
+----
+NULL
+
+# Test that order matters for deterministic results
+query I
+SELECT lower(to_hex(crypto_hash_agg('sha2-256', data ORDER BY data)))
+FROM (VALUES ('z'), ('a'), ('m')) t(data);
+----
+5e29b7ccc5ea951c86abf9f06ab936eaf9200fe7850de7140ee225200b96f956
+
+# Test that different order produces same hash when using ORDER BY
+query I
+SELECT lower(to_hex(crypto_hash_agg('sha2-256', data ORDER BY data)))
+FROM (VALUES ('m'), ('z'), ('a')) t(data);
+----
+5e29b7ccc5ea951c86abf9f06ab936eaf9200fe7850de7140ee225200b96f956
+
+# Test aggregate with GROUP BY
+query II
+SELECT category, lower(to_hex(crypto_hash_agg('sha2-256', value ORDER BY value)))
+FROM (VALUES ('A', 1), ('A', 2), ('B', 3), ('B', 4)) t(category, value)
+GROUP BY category
+ORDER BY category;
+----
+A	34fb5c825de7ca4aea6e712f19d439c1da0c92c37b423936c5f618545ca4fa1f
+B	8073c94ef47ecc86dcd78a8d9027a23484fadcd7cea37150319ba8cbf1c70b6b
+
+# Test with different hash algorithms
+query I
+SELECT lower(to_hex(crypto_hash_agg('md5', data ORDER BY data)))
+FROM (VALUES ('test1'), ('test2'), ('test3')) t(data);
+----
+741d9b60e2fa049b472abb9ecf3226df
+
+# Test with SHA3
+query I
+SELECT lower(to_hex(crypto_hash_agg('sha3-256', data ORDER BY data)))
+FROM (VALUES ('foo'), ('bar')) t(data);
+----
+59e1e4850ede3cda06d33c4ee221efc93cb301f9975bcae1a7bcdf44f40c6761
+
+# Test with Blake2b
+query I
+SELECT octet_length(crypto_hash_agg('blake2b-512', data ORDER BY data))
+FROM (VALUES ('x'), ('y')) t(data);
+----
+64
+
+# Test aggregate maintains length encoding for VARCHAR
+# This ensures ['ab', 'c'] hashes differently from ['a', 'bc']
+query I
+SELECT crypto_hash_agg('sha2-256', data ORDER BY data) !=
+       (SELECT crypto_hash_agg('sha2-256', data ORDER BY data)
+        FROM (VALUES ('a'), ('bc')) t2(data))
+FROM (VALUES ('ab'), ('c')) t(data);
+----
+true
+
+# Test that aggregate handles NULL values correctly (returns NULL for empty set)
+query I
+SELECT crypto_hash_agg('sha2-256', value ORDER BY value) IS NULL
+FROM (SELECT NULL::INTEGER WHERE false) t(value);
+----
+true
+
+# Test Blake3 aggregate with integers
+query I
+SELECT lower(to_hex(crypto_hash_agg('blake3', value ORDER BY value)))
+FROM (VALUES (1), (2), (3), (4), (5)) t(value);
+----
+e1ab5416e654193551c8ef929d39d23976b5123bea86538db46824cb1048d59c
+
+# Test Blake3 aggregate produces same result as list hash
+query I
+SELECT crypto_hash_agg('blake3', value ORDER BY value) =
+       crypto_hash('blake3', [1, 2, 3, 4, 5]::INTEGER[])
+FROM (VALUES (1), (2), (3), (4), (5)) t(value);
+----
+true
+
+# Test SHA2-256 aggregate produces same result as list hash
+query I
+SELECT crypto_hash_agg('sha2-256', value ORDER BY value) =
+       crypto_hash('sha2-256', [1, 2, 3, 4, 5]::INTEGER[])
+FROM (VALUES (1), (2), (3), (4), (5)) t(value);
+----
+true
+
+# Test VARCHAR aggregate produces same result as list hash
+query I
+SELECT crypto_hash_agg('sha2-256', data ORDER BY data) =
+       crypto_hash('sha2-256', ['hello', 'world']::VARCHAR[])
+FROM (VALUES ('hello'), ('world')) t(data);
+----
+true
+
+# Test error when ORDER BY is missing (order dependent)
+statement error
+SELECT crypto_hash_agg('sha2-256', data)
+FROM (VALUES ('a'), ('b')) t(data);
+----
+Invalid Input Error: Hash aggregation requires a distinct total ordering
+
+# Test error with invalid algorithm name
+statement error
+SELECT crypto_hash_agg('invalid-algo', data ORDER BY data)
+FROM (VALUES ('test')) t(data);
+----
+Invalid Input Error: Invalid hash algorithm 'invalid-algo'
+
+# Test aggregate with TINYINT
+query I
+SELECT lower(to_hex(crypto_hash_agg('sha2-256', value ORDER BY value)))
+FROM (VALUES (10::TINYINT), (20::TINYINT), (30::TINYINT)) t(value);
+----
+6951bbd9c2178b2a9d01714687307afda1eb6161ff8c398486a76683e7b42925
+
+# Test aggregate with SMALLINT
+query I
+SELECT lower(to_hex(crypto_hash_agg('sha2-256', value ORDER BY value)))
+FROM (VALUES (100::SMALLINT), (200::SMALLINT)) t(value);
+----
+0d2d6aaead9b4339d89a4a3323924f9657f9fc78b704641d9914731c4d73fce7
+
+# Test aggregate with UINTEGER
+query I
+SELECT octet_length(crypto_hash_agg('sha2-256', value ORDER BY value))
+FROM (VALUES (1::UINTEGER), (2::UINTEGER)) t(value);
+----
+32
+
+# Test aggregate with UBIGINT
+query I
+SELECT octet_length(crypto_hash_agg('sha2-256', value ORDER BY value))
+FROM (VALUES (100::UBIGINT), (200::UBIGINT)) t(value);
+----
+32
+
+# Test aggregate with FLOAT
+query I
+SELECT octet_length(crypto_hash_agg('sha2-256', value ORDER BY value))
+FROM (VALUES (1.1::FLOAT), (2.2::FLOAT)) t(value);
+----
+32
+
+# Test aggregate with BLOB
+query I
+SELECT octet_length(crypto_hash_agg('sha2-256', data ORDER BY data))
+FROM (VALUES ('\x01'::BLOB), ('\x02'::BLOB)) t(data);
+----
+32
+
+# Test aggregate with HUGEINT
+query I
+SELECT octet_length(crypto_hash_agg('sha2-256', value ORDER BY value))
+FROM (VALUES (12345678901234567890::HUGEINT)) t(value);
+----
+32
+
+# Test aggregate with UHUGEINT
+query I
+SELECT octet_length(crypto_hash_agg('sha2-256', value ORDER BY value))
+FROM (VALUES (12345678901234567890::UHUGEINT)) t(value);
+----
+32
+
+# Test that aggregate with multiple groups produces different hashes
+query I
+SELECT count(DISTINCT hash)
+FROM (
+  SELECT crypto_hash_agg('sha2-256', value ORDER BY value) AS hash
+  FROM (VALUES ('A', 1), ('A', 2), ('B', 3), ('B', 4)) t(category, value)
+  GROUP BY category
+) subq;
+----
+2
+
+# Test aggregate with larger dataset
+query I
+SELECT octet_length(crypto_hash_agg('sha2-256', value ORDER BY value))
+FROM range(100) t(value);
+----
+32
+
+# Test Blake3 aggregate with VARCHAR produces same as list
+query I
+SELECT crypto_hash_agg('blake3', data ORDER BY data) =
+       crypto_hash('blake3', ['hello', 'world']::VARCHAR[])
+FROM (VALUES ('hello'), ('world')) t(data);
+----
+true
