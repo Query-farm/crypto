@@ -550,7 +550,7 @@ namespace duckdb
                 logical_type, LogicalType::BLOB);
         agg_func.order_dependent = AggregateOrderDependent::ORDER_DEPENDENT;
         agg_func.distinct_dependent = AggregateDistinctDependent::DISTINCT_DEPENDENT;
-        agg_func.SetBindCallback(HashAggregateBind);
+        agg_func.bind = HashAggregateBind;
         // Add the argument for the algorithm name
         agg_func.arguments.insert(agg_func.arguments.begin(), LogicalType::VARCHAR);
         agg_set.AddFunction(agg_func);

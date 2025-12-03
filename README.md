@@ -1,6 +1,6 @@
 # Crypto Hash/HMAC Extension for DuckDB
 
-This extension, `crypto`, adds cryptographic hash functions and HMAC (Hash-based Message Authentication Code) calculation to DuckDB.
+The **Crypto** extension, developed by [**Query.Farm**](https://query.farm), adds cryptographic hash functions and HMAC (Hash-based Message Authentication Code) calculation to DuckDB.
 
 While DuckDB already includes basic hash functions like `hash()` and `sha256()`, this extension provides additional algorithms including Blake3, SHA-3, and supports hashing of various data types beyond just strings.
 
