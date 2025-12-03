@@ -303,13 +303,13 @@ namespace duckdb
     struct HashAggregateState
     {
         bool is_touched;
-        blake3_hasher blake3_hasher;
+        blake3_hasher b3_hasher;
         EVP_MD_CTX *ctx;
 
         HashAggregateState()
         {
             is_touched = false;
-            blake3_hasher_init(&blake3_hasher);
+            blake3_hasher_init(&b3_hasher);
             ctx = nullptr;
         }
     };
@@ -344,7 +344,7 @@ namespace duckdb
             // So this may fill the state with random garbage
             state.ctx = nullptr;
             state.is_touched = false;
-            blake3_hasher_init(&state.blake3_hasher);
+            blake3_hasher_init(&state.b3_hasher);
         }
 
         template <class STATE>
@@ -372,7 +372,7 @@ namespace duckdb
             {
                 if (!state.is_touched)
                 {
-                    blake3_hasher_init(&state.blake3_hasher);
+                    blake3_hasher_init(&state.b3_hasher);
                     state.is_touched = true;
                 }
 
@@ -380,12 +380,12 @@ namespace duckdb
                 if constexpr (std::is_same_v<A_TYPE, string_t>)
                 {
                     const uint64_t size = a_data.GetSize();
-                    blake3_hasher_update(&state.blake3_hasher, &size, sizeof(uint64_t));
-                    blake3_hasher_update(&state.blake3_hasher, a_data.GetDataUnsafe(), size);
+                    blake3_hasher_update(&state.b3_hasher, &size, sizeof(uint64_t));
+                    blake3_hasher_update(&state.b3_hasher, a_data.GetDataUnsafe(), size);
                 }
                 else
                 {
-                    blake3_hasher_update(&state.blake3_hasher, &a_data, sizeof(a_data));
+                    blake3_hasher_update(&state.b3_hasher, &a_data, sizeof(a_data));
                 }
             }
             else
@@ -444,7 +444,7 @@ namespace duckdb
             {
                 if (bind_data.is_blake3)
                 {
-                    target.blake3_hasher = source.blake3_hasher;
+                    target.b3_hasher = source.b3_hasher;
                 }
                 else
                 {
@@ -474,7 +474,7 @@ namespace duckdb
                     return;
                 }
                 char output[BLAKE3_OUT_LEN];
-                blake3_hasher_finalize(&state.blake3_hasher, reinterpret_cast<uint8_t *>(&output), BLAKE3_OUT_LEN);
+                blake3_hasher_finalize(&state.b3_hasher, reinterpret_cast<uint8_t *>(&output), BLAKE3_OUT_LEN);
                 target = StringVector::AddStringOrBlob(finalize_data.result, reinterpret_cast<const char *>(&output),
                                                        BLAKE3_OUT_LEN);
             }
