@@ -22,4 +22,7 @@ void CryptoHash(const std::string& algorithm, const char* data, size_t data_len,
 // Compute an HMAC (Hash-based Message Authentication Code)
 void CryptoHmac(const std::string& algorithm, const std::string& key, const std::string& data, unsigned char* result, unsigned int& result_len);
 
+// Generate cryptographically secure random bytes
+void CryptoRandomBytes(int64_t length, unsigned char* result);
+
 } // namespace duckdb

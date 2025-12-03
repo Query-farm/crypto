@@ -1038,3 +1038,101 @@ SELECT crypto_hash_agg('blake3', data ORDER BY data) =
 FROM (VALUES ('hello'), ('world')) t(data);
 ----
 true
+
+# Test crypto_random_bytes() - Random byte generation
+# =====================================================
+
+# Test basic random byte generation (32 bytes)
+query I
+SELECT octet_length(crypto_random_bytes(32));
+----
+32
+
+# Test small random byte generation (1 byte)
+query I
+SELECT octet_length(crypto_random_bytes(1));
+----
+1
+
+# Test larger random byte generation (1024 bytes)
+query I
+SELECT octet_length(crypto_random_bytes(1024));
+----
+1024
+
+# Test that random bytes are different on each call
+query I
+SELECT crypto_random_bytes(32) != crypto_random_bytes(32);
+----
+true
+
+# Test with different lengths produce different results
+query I
+SELECT octet_length(crypto_random_bytes(16)) != octet_length(crypto_random_bytes(32));
+----
+true
+
+# Test error case: zero bytes
+statement error
+SELECT crypto_random_bytes(0);
+----
+Invalid Input Error: Random bytes length must be greater than 0
+
+# Test error case: negative length
+statement error
+SELECT crypto_random_bytes(-1);
+----
+Invalid Input Error: Random bytes length must be greater than 0
+
+# Test error case: exceeds 4GB limit
+statement error
+SELECT crypto_random_bytes(4294967296);
+----
+Invalid Input Error: Random bytes length must be less than or equal to 4294967295 bytes (4GB)
+
+# Test NULL input returns NULL
+query I
+SELECT crypto_random_bytes(NULL::BIGINT) IS NULL;
+----
+true
+
+# Test that results are truly random (non-zero variance)
+# Generate 10 random bytes and verify they're not all the same
+query I
+SELECT crypto_random_bytes(10) != '\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'::BLOB;
+----
+true
+
+# Test at the maximum allowed size (4GB - 1 bytes)
+# Note: We'll test with a smaller size for practicality (1MB)
+query I
+SELECT octet_length(crypto_random_bytes(1048576));
+----
+1048576
+
+# Test using random bytes with crypto_hash
+query I
+SELECT octet_length(crypto_hash('sha2-256', crypto_random_bytes(64)));
+----
+32
+
+# Test in a table context (multiple rows)
+# The function is volatile, so each call produces different random bytes
+query I
+SELECT count(DISTINCT random_data)
+FROM (
+  SELECT crypto_random_bytes(16) AS random_data
+  FROM range(10)
+) subq;
+----
+10
+
+# Test that different calls produce different random values
+query I
+SELECT (
+  SELECT crypto_random_bytes(8)
+) != (
+  SELECT crypto_random_bytes(8)
+);
+----
+true

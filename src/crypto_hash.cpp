@@ -2,6 +2,7 @@
 #include "duckdb/common/string_util.hpp"
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <openssl/rand.h>
 #include <cstring>
 #include <unordered_map>
 #include <functional>
@@ -149,6 +150,33 @@ namespace duckdb
         if (hmac_result == nullptr)
         {
             throw InternalException("Failed to compute HMAC");
+        }
+    }
+
+    void CryptoRandomBytes(int64_t length, unsigned char *result)
+    {
+        // Validate input length
+        if (length <= 0)
+        {
+            throw InvalidInputException("Random bytes length must be greater than 0");
+        }
+
+        // DuckDB BLOB maximum size is 4GB (2^32 - 1 bytes)
+        constexpr int64_t MAX_BLOB_SIZE = 4294967295LL; // 4GB - 1
+        if (length > MAX_BLOB_SIZE)
+        {
+            throw InvalidInputException(
+                "Random bytes length must be less than or equal to " +
+                std::to_string(MAX_BLOB_SIZE) + " bytes (4GB)");
+        }
+
+        // Generate random bytes using OpenSSL's RAND_bytes
+        // RAND_bytes is cryptographically secure and automatically seeds itself
+        int rand_result = RAND_bytes(result, static_cast<int>(length));
+
+        if (rand_result != 1)
+        {
+            throw InternalException("Failed to generate random bytes");
         }
     }
 
