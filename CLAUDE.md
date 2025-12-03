@@ -53,10 +53,10 @@ Builds:
 ### Testing
 
 ```sh
-make test
+make test_debug
 ```
 
-Runs SQL tests located in `test/sql/crypto.test`.  but using the release build.
+Runs SQL tests located in `test/sql/*.test` but uses the debug build.
 
 ### Running the Extension
 
@@ -69,6 +69,7 @@ Launches DuckDB with the extension already loaded.
 ## Supported Hash Algorithms
 
 The extension supports these algorithms (defined in `src/crypto_hash.cpp:getDigestByName()`):
+- blake3
 - blake2b-512
 - keccak224, keccak256, keccak384, keccak512 (mapped to SHA3 variants)
 - md4, md5

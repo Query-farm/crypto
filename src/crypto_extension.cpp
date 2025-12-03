@@ -300,6 +300,62 @@ namespace duckdb
             });
     }
 
+    inline void CryptoScalarRandomBytesFun(DataChunk &args, ExpressionState &state, Vector &result)
+    {
+        // This is called with one argument: the number of bytes to generate
+        auto &length_vector = args.data[0];
+        auto count = args.size();
+
+        UnifiedVectorFormat length_data;
+        length_vector.ToUnifiedFormat(count, length_data);
+        auto lengths = UnifiedVectorFormat::GetData<int64_t>(length_data);
+
+        auto results = FlatVector::GetData<string_t>(result);
+
+        // Process each row
+        for (idx_t i = 0; i < count; i++)
+        {
+            auto length_idx = length_data.sel->get_index(i);
+
+            if (!length_data.validity.RowIsValid(length_idx))
+            {
+                FlatVector::SetNull(result, i, true);
+                continue;
+            }
+
+            int64_t length = lengths[length_idx];
+
+            // Validate length before allocation (CryptoRandomBytes will validate too, but we need to prevent allocation issues)
+            if (length <= 0)
+            {
+                throw InvalidInputException("Random bytes length must be greater than 0");
+            }
+
+            // DuckDB BLOB maximum size is 4GB (2^32 - 1 bytes)
+            constexpr int64_t MAX_BLOB_SIZE = 4294967295LL; // 4GB - 1
+            if (length > MAX_BLOB_SIZE)
+            {
+                throw InvalidInputException(
+                    "Random bytes length must be less than or equal to " +
+                    std::to_string(MAX_BLOB_SIZE) + " bytes (4GB)");
+            }
+
+            // Allocate buffer for random bytes
+            auto buffer = std::unique_ptr<unsigned char[]>(new unsigned char[length]);
+
+            // Generate random bytes (will also validate length)
+            CryptoRandomBytes(length, buffer.get());
+
+            // Add result as BLOB
+            results[i] = StringVector::AddStringOrBlob(result, string_t(reinterpret_cast<const char *>(buffer.get()), length));
+        }
+
+        if (count == 1)
+        {
+            result.SetVectorType(VectorType::CONSTANT_VECTOR);
+        }
+    }
+
     struct HashAggregateState
     {
         bool is_touched;
@@ -564,6 +620,11 @@ namespace duckdb
 
         auto crypto_hmac_scalar_function = ScalarFunction("crypto_hmac", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::BLOB, CryptoScalarHmacFun);
         loader.RegisterFunction(crypto_hmac_scalar_function);
+
+        auto crypto_random_bytes_scalar_function = ScalarFunction(
+            "crypto_random_bytes",
+            {LogicalType::BIGINT}, LogicalType::BLOB, CryptoScalarRandomBytesFun, nullptr, nullptr, nullptr, nullptr, LogicalTypeId::INVALID, FunctionStability::VOLATILE);
+        loader.RegisterFunction(crypto_random_bytes_scalar_function);
 
         auto agg_set = AggregateFunctionSet("crypto_hash_agg");
 

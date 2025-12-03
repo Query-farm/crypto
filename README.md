@@ -1,8 +1,8 @@
 # Crypto Hash/HMAC Extension for DuckDB
 
-This extension, `crypto`, adds cryptographic hash functions and HMAC (Hash-based Message Authentication Code) calculation to DuckDB.
+This extension, `crypto`, adds cryptographic hash functions, HMAC (Hash-based Message Authentication Code) calculation, and cryptographically secure random byte generation to DuckDB.
 
-While DuckDB already includes basic hash functions like `hash()` and `sha256()`, this extension provides additional algorithms including Blake3, SHA-3, and supports hashing of various data types beyond just strings.
+While DuckDB already includes basic hash functions like `hash()` and `sha256()`, this extension provides additional algorithms including Blake3, SHA-3, supports hashing of various data types beyond just strings, and includes secure random number generation using OpenSSL.
 
 ## Installation
 
@@ -31,6 +31,10 @@ SELECT lower(to_hex(crypto_hash('sha2-256', 42)));
 -- Calculate HMAC with a secret key
 SELECT lower(to_hex(crypto_hmac('sha2-256', 'my-secret-key', 'important message')));
 -- Result: 97f324adef061b4ad0abeb6be543913d7db6ba8e6e7f33cd3c4395d619b56df4
+
+-- Generate 32 cryptographically secure random bytes
+SELECT lower(to_hex(crypto_random_bytes(32)));
+-- Result: (random hex string, different each time)
 ```
 
 ## Hash Functions
@@ -177,6 +181,63 @@ FROM (VALUES (1), (2), (3), (4), (5)) t(value);
 -- true (aggregate hash matches list hash)
 ```
 
+## Random Byte Generation
+
+### crypto_random_bytes()
+
+**Syntax:**
+```sql
+crypto_random_bytes(length) → BLOB
+```
+
+Generates cryptographically secure random bytes using OpenSSL's `RAND_bytes()` function. This is useful for generating random keys, salts, nonces, and other cryptographic material.
+
+**Parameters:**
+- `length` (BIGINT): The number of random bytes to generate (must be between 1 and 4,294,967,295)
+
+**Returns:** BLOB containing the requested number of cryptographically secure random bytes
+
+**Security:** Uses OpenSSL's `RAND_bytes()`, which provides cryptographically strong random numbers suitable for security-sensitive applications like key generation and cryptographic operations.
+
+**Limits:**
+- Minimum length: 1 byte
+- Maximum length: 4,294,967,295 bytes (4GB - 1, the maximum BLOB size in DuckDB)
+- Requesting 0 or negative bytes raises an `InvalidInputException`
+- Requesting more than 4GB raises an `InvalidInputException`
+
+### Examples
+
+```sql
+-- Generate 32 random bytes (suitable for AES-256 key)
+SELECT crypto_random_bytes(32);
+
+-- Generate random bytes and convert to hex for display
+SELECT lower(to_hex(crypto_random_bytes(16)));
+-- Example output: 3f7a2b8c9d1e4f6a8b2c3d4e5f6a7b8c
+
+-- Generate a random salt for password hashing
+SELECT crypto_random_bytes(16) AS salt;
+
+-- Use random bytes as an HMAC key
+SELECT crypto_hmac('sha2-256', crypto_random_bytes(32), 'message to authenticate');
+
+-- Generate multiple random values in a table
+CREATE TABLE api_keys (id INTEGER, api_key BLOB);
+INSERT INTO api_keys
+SELECT id, crypto_random_bytes(32)
+FROM range(10) t(id);
+
+-- Verify randomness (each call produces different output)
+SELECT crypto_random_bytes(16) != crypto_random_bytes(16);
+-- true
+
+-- Generate a 128-bit random UUID-like value
+SELECT lower(to_hex(crypto_random_bytes(16)));
+
+-- Create a random nonce for cryptographic operations
+SELECT crypto_random_bytes(12) AS nonce;  -- 96-bit nonce for AES-GCM
+```
+
 ## HMAC Functions
 
 ### crypto_hmac()
@@ -228,6 +289,32 @@ FROM api_requests;
 ```
 
 ## Common Use Cases
+
+### Generating Cryptographic Keys and Salts
+```sql
+-- Generate a random AES-256 encryption key
+SELECT crypto_random_bytes(32) AS encryption_key;
+
+-- Generate random salts for password hashing
+CREATE TABLE users (
+  id INTEGER,
+  username VARCHAR,
+  password_hash BLOB,
+  salt BLOB
+);
+
+INSERT INTO users (id, username, salt)
+VALUES (1, 'alice', crypto_random_bytes(16));
+
+-- Generate random HMAC keys
+SELECT crypto_random_bytes(32) AS hmac_key;
+
+-- Create a table with random API keys
+CREATE TABLE api_credentials (
+  user_id INTEGER,
+  api_key BLOB DEFAULT crypto_random_bytes(32)
+);
+```
 
 ### Generating Unique IDs
 ```sql
