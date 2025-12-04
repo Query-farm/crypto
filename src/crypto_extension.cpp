@@ -7,6 +7,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
+#include <duckdb/parser/parsed_data/create_aggregate_function_info.hpp>
 #include <openssl/evp.h>
 #include <algorithm>
 #include <cctype>
@@ -592,17 +593,50 @@ namespace duckdb
 
     static void LoadInternal(ExtensionLoader &loader)
     {
-        // crypto_hash accepts VARCHAR for algorithm name and ANY type for the data to hash
+        // crypto_hash: Computes cryptographic hash of data using specified algorithm
         auto crypto_hash_scalar_function = ScalarFunction("crypto_hash", {LogicalType::VARCHAR, LogicalType::ANY}, LogicalType::BLOB, CryptoScalarHashFun);
-        loader.RegisterFunction(crypto_hash_scalar_function);
+        CreateScalarFunctionInfo crypto_hash_info(crypto_hash_scalar_function);
+        crypto_hash_info.descriptions.push_back({
+            {LogicalType::VARCHAR, LogicalType::ANY},                                // parameter_types
+            {"algorithm", "value"},                                                   // parameter_names
+            "Computes a cryptographic hash of the input value using the specified algorithm. "
+            "Supported algorithms: blake3, sha2-256, sha2-512, sha3-256, sha3-512, md5, sha1, and more. "
+            "Accepts strings, integers, floats, dates, timestamps, UUIDs, and lists of fixed-length types.",  // description
+            {"crypto_hash('sha2-256', 'hello world')",
+             "crypto_hash('blake3', 42)",
+             "crypto_hash('sha2-256', [1, 2, 3])"},                                  // examples
+            {"cryptography", "hash"}                                                  // categories
+        });
+        loader.RegisterFunction(crypto_hash_info);
 
+        // crypto_hmac: Computes HMAC of message with key using specified algorithm
         auto crypto_hmac_scalar_function = ScalarFunction("crypto_hmac", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::BLOB, CryptoScalarHmacFun);
-        loader.RegisterFunction(crypto_hmac_scalar_function);
+        CreateScalarFunctionInfo crypto_hmac_info(crypto_hmac_scalar_function);
+        crypto_hmac_info.descriptions.push_back({
+            {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},      // parameter_types
+            {"algorithm", "key", "message"},                                          // parameter_names
+            "Computes an HMAC (Hash-based Message Authentication Code) of the message using the specified "
+            "algorithm and key. Supports all hash algorithms except blake3, which requires exactly 32 bytes for the key.",  // description
+            {"crypto_hmac('sha2-256', 'secret_key', 'message to authenticate')"},    // examples
+            {"cryptography", "hmac", "authentication"}                                // categories
+        });
+        loader.RegisterFunction(crypto_hmac_info);
 
+        // crypto_random_bytes: Generates cryptographically secure random bytes
         auto crypto_random_bytes_scalar_function = ScalarFunction(
             "crypto_random_bytes",
             {LogicalType::BIGINT}, LogicalType::BLOB, CryptoScalarRandomBytesFun, nullptr, nullptr, nullptr, nullptr, LogicalTypeId::INVALID, FunctionStability::VOLATILE);
-        loader.RegisterFunction(crypto_random_bytes_scalar_function);
+        CreateScalarFunctionInfo crypto_random_bytes_info(crypto_random_bytes_scalar_function);
+        crypto_random_bytes_info.descriptions.push_back({
+            {LogicalType::BIGINT},                                                   // parameter_types
+            {"length"},                                                              // parameter_names
+            "Generates cryptographically secure random bytes using OpenSSL's RAND_bytes(). "
+            "Length must be between 1 and 4,294,967,295 bytes. Each call produces different random bytes.",  // description
+            {"crypto_random_bytes(16)",
+             "crypto_random_bytes(32)"},                                             // examples
+            {"cryptography", "random"}                                               // categories
+        });
+        loader.RegisterFunction(crypto_random_bytes_info);
 
         auto agg_set = AggregateFunctionSet("crypto_hash_agg");
 
@@ -622,11 +656,23 @@ namespace duckdb
         RegisterHashAggType<hugeint_t>(agg_set, LogicalType::HUGEINT);
         RegisterHashAggType<uhugeint_t>(agg_set, LogicalType::UHUGEINT);
 
-        // // Fixed-size floating point types
+        // Fixed-size floating point types
         RegisterHashAggType<float>(agg_set, LogicalType::FLOAT);
         RegisterHashAggType<double>(agg_set, LogicalType::DOUBLE);
 
-        loader.RegisterFunction(agg_set);
+        // crypto_hash_agg: Aggregate function for hashing multiple rows
+        CreateAggregateFunctionInfo crypto_hash_agg_info(agg_set);
+        crypto_hash_agg_info.descriptions.push_back({
+            {LogicalType::VARCHAR, LogicalType::ANY},                                // parameter_types
+            {"algorithm", "value"},                                                   // parameter_names
+            "Computes a cryptographic hash over multiple rows using the specified algorithm. "
+            "ORDER BY is required to ensure deterministic results. Returns the same hash as crypto_hash() "
+            "would for an equivalent ordered list. Returns NULL for empty result sets.",  // description
+            {"crypto_hash_agg('sha2-256', column_name ORDER BY id)",
+             "crypto_hash_agg('blake3', data ORDER BY timestamp)"},                  // examples
+            {"cryptography", "hash", "aggregate"}                                     // categories
+        });
+        loader.RegisterFunction(crypto_hash_agg_info);
 
         QueryFarmSendTelemetry(loader, "crypto", "2025120201");
     }
