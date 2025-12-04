@@ -10,8 +10,17 @@ typedef struct evp_md_st EVP_MD;
 
 namespace duckdb {
 
+// Maximum size for random bytes (DuckDB BLOB max is 4GB - 1)
+constexpr int64_t CRYPTO_MAX_RANDOM_BYTES = 4294967295LL;
+
 // Get the shared digest map for algorithm name lookups
 const std::unordered_map<std::string, std::function<const EVP_MD *()>>& GetDigestMap();
+
+// Lookup algorithm by name - returns nullptr for blake3, throws on invalid algorithm
+const EVP_MD* LookupAlgorithm(const std::string& algorithm);
+
+// Validate random bytes length - throws InvalidInputException if invalid
+void ValidateRandomBytesLength(int64_t length);
 
 // Compute a cryptographic hash of the input data
 void CryptoHash(const std::string& algorithm, const std::string& data, unsigned char* result, unsigned int& result_len);

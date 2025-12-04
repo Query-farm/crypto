@@ -45,32 +45,50 @@ namespace duckdb
             }
             return result;
         }
+    }
 
-        const EVP_MD *getDigestByName(const std::string &algorithm)
+    const EVP_MD *LookupAlgorithm(const std::string &algorithm)
+    {
+        std::string algo_lower = StringUtil::Lower(algorithm);
+
+        if (algo_lower == "blake3")
         {
-            std::string algo_lower = StringUtil::Lower(algorithm);
-
-            if (algo_lower == "blake3")
-            {
-                return nullptr;
-            }
-
-            auto it = GetDigestMap().find(algo_lower);
-            if (it != GetDigestMap().end())
-            {
-                return it->second();
-            }
-
             return nullptr;
+        }
+
+        auto it = GetDigestMap().find(algo_lower);
+        if (it != GetDigestMap().end())
+        {
+            return it->second();
+        }
+
+        throw InvalidInputException(
+            "Invalid hash algorithm '" + algorithm + "'. " +
+            "Available algorithms are: " + getAvailableAlgorithms());
+    }
+
+    void ValidateRandomBytesLength(int64_t length)
+    {
+        if (length <= 0)
+        {
+            throw InvalidInputException("Random bytes length must be greater than 0");
+        }
+
+        if (length > CRYPTO_MAX_RANDOM_BYTES)
+        {
+            throw InvalidInputException(
+                "Random bytes length must be less than or equal to " +
+                std::to_string(CRYPTO_MAX_RANDOM_BYTES) + " bytes (4GB)");
         }
     }
 
     void CryptoHash(const std::string &algorithm, const char *data, size_t data_len, unsigned char *result, unsigned int &result_len)
     {
-        std::string algo_lower = StringUtil::Lower(algorithm);
+        // LookupAlgorithm returns nullptr for blake3, throws on invalid algorithm
+        const EVP_MD *md = LookupAlgorithm(algorithm);
 
         // Handle Blake3 separately since it doesn't use OpenSSL
-        if (algo_lower == "blake3")
+        if (md == nullptr)
         {
             blake3_hasher hasher;
             blake3_hasher_init(&hasher);
@@ -78,15 +96,6 @@ namespace duckdb
             blake3_hasher_finalize(&hasher, result, BLAKE3_OUT_LEN);
             result_len = BLAKE3_OUT_LEN;
             return;
-        }
-
-        const EVP_MD *md = getDigestByName(algo_lower);
-
-        if (md == nullptr)
-        {
-            throw InvalidInputException(
-                "Invalid hash algorithm '" + algorithm + "'. " +
-                "Available algorithms are: " + getAvailableAlgorithms());
         }
 
         EVP_MD_CTX *ctx = EVP_MD_CTX_new();
@@ -113,10 +122,11 @@ namespace duckdb
 
     void CryptoHmac(const std::string &algorithm, const std::string &key, const std::string &data, unsigned char *result, unsigned int &result_len)
     {
-        std::string algo_lower = StringUtil::Lower(algorithm);
+        // LookupAlgorithm returns nullptr for blake3, throws on invalid algorithm
+        const EVP_MD *md = LookupAlgorithm(algorithm);
 
         // Handle Blake3 HMAC separately
-        if (algo_lower == "blake3")
+        if (md == nullptr)
         {
             // Blake3 keyed mode requires exactly 32 bytes for the key
             if (key.size() != BLAKE3_KEY_LEN)
@@ -130,15 +140,6 @@ namespace duckdb
             blake3_hasher_finalize(&hasher, result, BLAKE3_OUT_LEN);
             result_len = BLAKE3_OUT_LEN;
             return;
-        }
-
-        const EVP_MD *md = getDigestByName(algo_lower);
-
-        if (md == nullptr)
-        {
-            throw InvalidInputException(
-                "Invalid hash algorithm '" + algorithm + "'. " +
-                "Available algorithms are: " + getAvailableAlgorithms());
         }
 
         unsigned char *hmac_result = HMAC(
@@ -155,20 +156,7 @@ namespace duckdb
 
     void CryptoRandomBytes(int64_t length, unsigned char *result)
     {
-        // Validate input length
-        if (length <= 0)
-        {
-            throw InvalidInputException("Random bytes length must be greater than 0");
-        }
-
-        // DuckDB BLOB maximum size is 4GB (2^32 - 1 bytes)
-        constexpr int64_t MAX_BLOB_SIZE = 4294967295LL; // 4GB - 1
-        if (length > MAX_BLOB_SIZE)
-        {
-            throw InvalidInputException(
-                "Random bytes length must be less than or equal to " +
-                std::to_string(MAX_BLOB_SIZE) + " bytes (4GB)");
-        }
+        ValidateRandomBytesLength(length);
 
         // Generate random bytes using OpenSSL's RAND_bytes
         // RAND_bytes is cryptographically secure and automatically seeds itself
