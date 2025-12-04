@@ -125,23 +125,6 @@ namespace duckdb
                 throw InvalidInputException("Unsupported child type in list for crypto_hash");
             }
         }
-
-        // Helper to lookup algorithm - returns nullptr for blake3, throws on invalid algorithm
-        const EVP_MD *LookupAlgorithm(const std::string &hash_name_str)
-        {
-            if (hash_name_str == "blake3")
-            {
-                return nullptr;
-            }
-
-            auto it = GetDigestMap().find(hash_name_str);
-            if (it != GetDigestMap().end())
-            {
-                return it->second();
-            }
-
-            throw InvalidInputException("Invalid hash algorithm '" + hash_name_str + "'");
-        }
     }
 
     inline void CryptoScalarHashFun(DataChunk &args, ExpressionState &state, Vector &result)
@@ -325,25 +308,13 @@ namespace duckdb
 
             int64_t length = lengths[length_idx];
 
-            // Validate length before allocation (CryptoRandomBytes will validate too, but we need to prevent allocation issues)
-            if (length <= 0)
-            {
-                throw InvalidInputException("Random bytes length must be greater than 0");
-            }
-
-            // DuckDB BLOB maximum size is 4GB (2^32 - 1 bytes)
-            constexpr int64_t MAX_BLOB_SIZE = 4294967295LL; // 4GB - 1
-            if (length > MAX_BLOB_SIZE)
-            {
-                throw InvalidInputException(
-                    "Random bytes length must be less than or equal to " +
-                    std::to_string(MAX_BLOB_SIZE) + " bytes (4GB)");
-            }
+            // Validate length before allocation to prevent allocation issues
+            ValidateRandomBytesLength(length);
 
             // Allocate buffer for random bytes
             auto buffer = std::unique_ptr<unsigned char[]>(new unsigned char[length]);
 
-            // Generate random bytes (will also validate length)
+            // Generate random bytes
             CryptoRandomBytes(length, buffer.get());
 
             // Add result as BLOB
@@ -505,7 +476,14 @@ namespace duckdb
                 else
                 {
                     target.ctx = EVP_MD_CTX_new();
-                    EVP_MD_CTX_copy_ex(target.ctx, source.ctx);
+                    if (target.ctx == nullptr)
+                    {
+                        throw InternalException("Failed to create hash context");
+                    }
+                    if (EVP_MD_CTX_copy_ex(target.ctx, source.ctx) != 1)
+                    {
+                        throw InternalException("Failed to copy hash context");
+                    }
                 }
                 target.is_touched = true;
             }
