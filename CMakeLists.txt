@@ -20,6 +20,7 @@ find_package(blake3 CONFIG REQUIRED)
 set(EXTENSION_SOURCES
     src/crypto_extension.cpp
     src/crypto_hash.cpp
+    src/crypto_enc.cpp
     src/query_farm_telemetry.cpp
 )
 
