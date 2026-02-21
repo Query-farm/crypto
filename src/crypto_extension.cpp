@@ -2,6 +2,7 @@
 
 #include "crypto_extension.hpp"
 #include "crypto_hash.hpp"
+#include "crypto_enc.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -22,10 +23,10 @@ namespace duckdb
     namespace
     {
         // RAII wrapper for EVP_MD_CTX
-        class EVPContext
+        class EVPMDContext
         {
         public:
-            EVPContext()
+            EVPMDContext()
             {
                 ctx = EVP_MD_CTX_new();
                 if (ctx == nullptr)
@@ -34,7 +35,7 @@ namespace duckdb
                 }
             }
 
-            ~EVPContext()
+            ~EVPMDContext()
             {
                 if (ctx)
                 {
@@ -42,8 +43,8 @@ namespace duckdb
                 }
             }
 
-            EVPContext(const EVPContext &) = delete;
-            EVPContext &operator=(const EVPContext &) = delete;
+            EVPMDContext(const EVPMDContext &) = delete;
+            EVPMDContext &operator=(const EVPMDContext &) = delete;
 
             void Init(const EVP_MD *md)
             {
@@ -102,7 +103,7 @@ namespace duckdb
         }
 
         // Helper to hash a single list element with EVP
-        void HashListElementEVP(EVPContext &evp_ctx, const LogicalType &child_type,
+        void HashListElementEVP(EVPMDContext &evp_ctx, const LogicalType &child_type,
                                 UnifiedVectorFormat &child_format, idx_t child_idx)
         {
             if (child_type == LogicalType::VARCHAR || child_type == LogicalType::BLOB)
@@ -213,7 +214,7 @@ namespace duckdb
                 }
                 else
                 {
-                    EVPContext evp_ctx;
+                    EVPMDContext evp_ctx;
                     evp_ctx.Init(md);
 
                     for (idx_t list_idx = 0; list_idx < list_entry.length; list_idx++)
@@ -660,6 +661,8 @@ namespace duckdb
         RegisterHashAggType<float>(agg_set, LogicalType::FLOAT);
         RegisterHashAggType<double>(agg_set, LogicalType::DOUBLE);
 
+        loader.RegisterFunction(agg_set);
+        
         // crypto_hash_agg: Aggregate function for hashing multiple rows
         CreateAggregateFunctionInfo crypto_hash_agg_info(agg_set);
         crypto_hash_agg_info.descriptions.push_back({
@@ -673,13 +676,13 @@ namespace duckdb
             {"cryptography", "hash", "aggregate"}                                     // categories
         });
         loader.RegisterFunction(crypto_hash_agg_info);
-
+        LoadCipherInternal(loader);
         QueryFarmSendTelemetry(loader, "crypto", "2025120201");
     }
 
     void CryptoExtension::Load(ExtensionLoader &loader)
     {
-        LoadInternal(loader);
+        LoadInternal(loader);        
     }
     std::string CryptoExtension::Name()
     {
