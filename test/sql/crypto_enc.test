@@ -1,0 +1,44 @@
+# name: test/sql/crypto_enc.test
+# description: test crypto extension encryption functions
+# group: [crypto]
+
+# Before we load the extension, this will fail 
+statement error
+SELECT crypto_encrypt('aes-256-cbc', '01234567012345670123456701234567', 'blah blah blah');
+----
+Catalog Error: Scalar Function with name crypto_encrypt does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require crypto
+
+# Confirm the extension works - returns BLOBs that can be converted to hex
+query I
+SELECT to_hex(crypto_encrypt('aes-256-cbc', '01234567012345670123456701234567', 'blah blah blah')) != to_hex('blah blah blah');
+----
+true
+
+# Confirm the extension works - returns BLOBs that can be converted to hex
+query I
+SELECT crypto_decrypt('aes-256-gcm', '01234567012345670123456701234567', crypto_encrypt('aes-256-gcm', '01234567012345670123456701234567', 'blah blah blah'));
+----
+blah blah blah
+
+# Confirm the extension works - returns BLOBs that can be converted to hex
+query I
+SELECT to_hex(crypto_encrypt('aes-256-gcm', '01234567012345670123456701234567', 'blah blah blah')) != to_hex('blah blah blah');
+----
+true
+
+# Error on invalid cipher
+statement error
+SELECT crypto_encrypt('aes-2x56-cbcs', '01234567012345670123456701234567', 'blah blah blah');
+----
+Invalid Input Error: Invalid ciphername 'aes-2x56-cbcs'
+
+
+# Confirm the extension works - returns BLOBs that can be converted to hex
+# query I
+# SELECT crypto_decrypt('aes-256-gcm', '01234567012345670123456701234567', crypto_encrypt('aes-256-gcm', '01234567012345670123456701234A67', 'blah blah blah'));
+# ----
+# blah blah blah
+
