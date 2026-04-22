@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.5)
 
-set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_CXX_STANDARD_REQUIRED 1)
+set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard to enforce" FORCE)
+set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 # Set extension name here
 set(TARGET_NAME crypto)
