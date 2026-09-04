@@ -674,7 +674,7 @@ namespace duckdb
         });
         loader.RegisterFunction(crypto_hash_agg_info);
 
-        QueryFarmSendTelemetry(loader, "crypto", "2025120201");
+        QueryFarmSendTelemetry(loader, "crypto", "2026072501");
     }
 
     void CryptoExtension::Load(ExtensionLoader &loader)
