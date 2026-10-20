@@ -8,6 +8,11 @@
 #include "duckdb/function/scalar_function.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <duckdb/parser/parsed_data/create_aggregate_function_info.hpp>
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
+#include "duckdb/common/vector/unified_vector_format.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 #include <openssl/evp.h>
 #include <algorithm>
 #include <cctype>
@@ -137,13 +142,13 @@ namespace duckdb
         // Get unified format for both vectors
         UnifiedVectorFormat hash_name_data;
         UnifiedVectorFormat value_data;
-        hash_name_vector.ToUnifiedFormat(count, hash_name_data);
-        value_vector.ToUnifiedFormat(count, value_data);
+        hash_name_vector.ToUnifiedFormat(hash_name_data);
+        value_vector.ToUnifiedFormat(value_data);
 
         auto hash_names = UnifiedVectorFormat::GetData<string_t>(hash_name_data);
         auto &value_type = value_vector.GetType();
 
-        auto results = FlatVector::GetData<string_t>(result);
+        auto results = FlatVector::GetDataMutable<string_t>(result);
 
         // Process each row
         for (idx_t i = 0; i < count; i++)
@@ -189,9 +194,9 @@ namespace duckdb
                 auto &list_entry = list_data[value_idx];
 
                 // Get the child vector
-                auto &child_vector = ListVector::GetEntry(value_vector);
+                auto &child_vector = ListVector::GetChild(value_vector);
                 UnifiedVectorFormat child_format;
-                child_vector.ToUnifiedFormat(ListVector::GetListSize(value_vector), child_format);
+                child_vector.ToUnifiedFormat(child_format);
 
                 if (hash_name_str == "blake3")
                 {
@@ -269,7 +274,7 @@ namespace duckdb
         auto &value_vector = args.data[2];
 
         TernaryExecutor::Execute<string_t, string_t, string_t, string_t>(
-            hash_function_name_vector, key_vector, value_vector, result, args.size(),
+            hash_function_name_vector, key_vector, value_vector, result,
             [&](string_t hash_function_name, string_t key, string_t value)
             {
                 string hash_name_str(hash_function_name.GetData(), hash_function_name.GetSize());
@@ -291,10 +296,10 @@ namespace duckdb
         auto count = args.size();
 
         UnifiedVectorFormat length_data;
-        length_vector.ToUnifiedFormat(count, length_data);
+        length_vector.ToUnifiedFormat(length_data);
         auto lengths = UnifiedVectorFormat::GetData<int64_t>(length_data);
 
-        auto results = FlatVector::GetData<string_t>(result);
+        auto results = FlatVector::GetDataMutable<string_t>(result);
 
         // Process each row
         for (idx_t i = 0; i < count; i++)
@@ -534,18 +539,13 @@ namespace duckdb
         }
     };
 
-    unique_ptr<FunctionData> HashAggregateBind(ClientContext &context, AggregateFunction &function,
-                                               vector<unique_ptr<Expression>> &arguments)
+    unique_ptr<FunctionData> HashAggregateBind(BindAggregateFunctionInput &input)
     {
+        auto &context = input.GetClientContext();
+        auto &arguments = input.GetArguments();
         // The first argument is the hash algorithm name
         bool is_blake3 = false;
         const EVP_MD *md = nullptr;
-
-        if (arguments.size() == 1)
-        {
-            // The bind has already happened, return nullptr to indicate no further binding is needed
-            return nullptr;
-        }
 
         if (arguments.size() != 2)
         {
@@ -572,22 +572,37 @@ namespace duckdb
         md = LookupAlgorithm(cached_hash_name);
         is_blake3 = (md == nullptr);
 
-        Function::EraseArgument(function, arguments, 0);
+        // The algorithm argument stays part of the argument list (DuckDB 2.0 no longer allows erasing
+        // arguments); the update callback skips it and reads the data from the second argument.
         return make_uniq<HashAggregateBindData>(is_blake3, md);
     }
 
-    // Helper function to register a variable-size type aggregate (VARCHAR, BLOB)
+    // Update callback that ignores the leading (constant) algorithm argument and aggregates the second one
+    template <class STATE, class INPUT_TYPE, class OP>
+    static void HashAggScatterUpdate(Vector inputs[], AggregateInputData &aggr_input_data, idx_t input_count,
+                                     Vector &states, idx_t count)
+    {
+        D_ASSERT(input_count == 2);
+        AggregateExecutor::UnaryScatter<STATE, INPUT_TYPE, OP>(inputs[1], states, aggr_input_data, count);
+    }
+
+    // Helper function to register a hash aggregate for a given input type
     template <typename CPP_TYPE>
     static void RegisterHashAggType(AggregateFunctionSet &agg_set, const LogicalType &logical_type)
     {
-        auto agg_func =
-            AggregateFunction::UnaryAggregateDestructor<HashAggregateState, CPP_TYPE, string_t, HashAggregateOperation<HashAggregateState>>(
-                logical_type, LogicalType::BLOB);
-        agg_func.order_dependent = AggregateOrderDependent::ORDER_DEPENDENT;
-        agg_func.distinct_dependent = AggregateDistinctDependent::DISTINCT_DEPENDENT;
+        using OP = HashAggregateOperation<HashAggregateState>;
+        AggregateFunction agg_func({LogicalType::VARCHAR, logical_type}, LogicalType::BLOB,
+                                   AggregateFunction::StateSize<HashAggregateState>,
+                                   AggregateFunction::StateInitialize<HashAggregateState, OP>,
+                                   HashAggScatterUpdate<HashAggregateState, CPP_TYPE, OP>,
+                                   AggregateFunction::StateCombine<HashAggregateState, OP>,
+                                   AggregateFunction::StateFinalize<HashAggregateState, string_t, OP>,
+                                   FunctionNullHandling::DEFAULT_NULL_HANDLING);
+        agg_func.SetStateDestructorCallback(AggregateFunction::StateDestroy<HashAggregateState, OP>);
+        agg_func.SetOrderDependent(AggregateOrderDependent::ORDER_DEPENDENT);
+        agg_func.SetDistinctDependent(AggregateDistinctDependent::DISTINCT_DEPENDENT);
         agg_func.SetBindCallback(HashAggregateBind);
-        // Add the argument for the algorithm name
-        agg_func.arguments.insert(agg_func.arguments.begin(), LogicalType::VARCHAR);
+        agg_func.SetFallible();
         agg_set.AddFunction(agg_func);
     }
 
@@ -595,6 +610,7 @@ namespace duckdb
     {
         // crypto_hash: Computes cryptographic hash of data using specified algorithm
         auto crypto_hash_scalar_function = ScalarFunction("crypto_hash", {LogicalType::VARCHAR, LogicalType::ANY}, LogicalType::BLOB, CryptoScalarHashFun);
+        crypto_hash_scalar_function.SetFallible();
         CreateScalarFunctionInfo crypto_hash_info(crypto_hash_scalar_function);
         crypto_hash_info.descriptions.push_back({
             {LogicalType::VARCHAR, LogicalType::ANY},                                // parameter_types
@@ -611,6 +627,7 @@ namespace duckdb
 
         // crypto_hmac: Computes HMAC of message with key using specified algorithm
         auto crypto_hmac_scalar_function = ScalarFunction("crypto_hmac", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::BLOB, CryptoScalarHmacFun);
+        crypto_hmac_scalar_function.SetFallible();
         CreateScalarFunctionInfo crypto_hmac_info(crypto_hmac_scalar_function);
         crypto_hmac_info.descriptions.push_back({
             {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},      // parameter_types
@@ -625,7 +642,9 @@ namespace duckdb
         // crypto_random_bytes: Generates cryptographically secure random bytes
         auto crypto_random_bytes_scalar_function = ScalarFunction(
             "crypto_random_bytes",
-            {LogicalType::BIGINT}, LogicalType::BLOB, CryptoScalarRandomBytesFun, nullptr, nullptr, nullptr, nullptr, LogicalTypeId::INVALID, FunctionStability::VOLATILE);
+            {LogicalType::BIGINT}, LogicalType::BLOB, CryptoScalarRandomBytesFun);
+        crypto_random_bytes_scalar_function.SetVolatile();
+        crypto_random_bytes_scalar_function.SetFallible();
         CreateScalarFunctionInfo crypto_random_bytes_info(crypto_random_bytes_scalar_function);
         crypto_random_bytes_info.descriptions.push_back({
             {LogicalType::BIGINT},                                                   // parameter_types
