@@ -1,0 +1,37 @@
+# name: test/sql/crypto_parameter_names.test
+# description: duckdb_functions() reports the declared parameter names instead of col<N>
+# group: [crypto]
+
+require crypto
+
+query II
+SELECT DISTINCT function_name, parameters FROM duckdb_functions()
+WHERE function_name IN ('crypto_hash', 'crypto_hash_agg', 'crypto_hmac', 'crypto_random_bytes')
+ORDER BY ALL;
+----
+crypto_hash	[algorithm, value]
+crypto_hash_agg	[algorithm, value]
+crypto_hmac	[algorithm, key, message]
+crypto_random_bytes	[length]
+
+# The parameters are still positional: calls work as before
+
+query I
+SELECT lower(to_hex(crypto_hash('md5', 'test')));
+----
+098f6bcd4621d373cade4e832627b4f6
+
+query I
+SELECT lower(to_hex(crypto_hmac('md5', 'test key', 'test message')));
+----
+3e07538991791b125a9c6509f6a9f689
+
+query I
+SELECT octet_length(crypto_random_bytes(16));
+----
+16
+
+query I
+SELECT lower(to_hex(crypto_hash_agg('sha2-256', data ORDER BY data))) FROM (VALUES ('a'), ('b'), ('c')) t(data);
+----
+3d10f2e96612f8284bd5233f0c75d6283331be5afd353c22cfacb4872685a972

@@ -598,6 +598,9 @@ namespace duckdb
                                    AggregateFunction::StateCombine<HashAggregateState, OP>,
                                    AggregateFunction::StateFinalize<HashAggregateState, string_t, OP>,
                                    FunctionNullHandling::DEFAULT_NULL_HANDLING);
+        // Name the positional parameters, so duckdb_functions() reports them instead of col<N>.
+        agg_func.GetSignature().GetParameter(0).SetName("algorithm");
+        agg_func.GetSignature().GetParameter(1).SetName("value");
         agg_func.SetStateDestructorCallback(AggregateFunction::StateDestroy<HashAggregateState, OP>);
         agg_func.SetOrderDependent(AggregateOrderDependent::ORDER_DEPENDENT);
         agg_func.SetDistinctDependent(AggregateDistinctDependent::DISTINCT_DEPENDENT);
@@ -606,10 +609,15 @@ namespace duckdb
         agg_set.AddFunction(agg_func);
     }
 
+    // Declares a positional-only parameter with a real name, so duckdb_functions() reports it instead of col<N>.
+    static FunctionParameter Positional(const char *name, LogicalType type) {
+        return FunctionParameter(name, std::move(type), {}, FunctionParameterKind::POSITIONAL_ONLY);
+    }
+
     static void LoadInternal(ExtensionLoader &loader)
     {
         // crypto_hash: Computes cryptographic hash of data using specified algorithm
-        auto crypto_hash_scalar_function = ScalarFunction("crypto_hash", {LogicalType::VARCHAR, LogicalType::ANY}, LogicalType::BLOB, CryptoScalarHashFun);
+        auto crypto_hash_scalar_function = ScalarFunction("crypto_hash", {Positional("algorithm", LogicalType::VARCHAR), Positional("value", LogicalType::ANY)}, LogicalType::BLOB, CryptoScalarHashFun);
         crypto_hash_scalar_function.SetFallible();
         CreateScalarFunctionInfo crypto_hash_info(crypto_hash_scalar_function);
         crypto_hash_info.descriptions.push_back({
@@ -626,7 +634,7 @@ namespace duckdb
         loader.RegisterFunction(crypto_hash_info);
 
         // crypto_hmac: Computes HMAC of message with key using specified algorithm
-        auto crypto_hmac_scalar_function = ScalarFunction("crypto_hmac", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::BLOB, CryptoScalarHmacFun);
+        auto crypto_hmac_scalar_function = ScalarFunction("crypto_hmac", {Positional("algorithm", LogicalType::VARCHAR), Positional("key", LogicalType::VARCHAR), Positional("message", LogicalType::VARCHAR)}, LogicalType::BLOB, CryptoScalarHmacFun);
         crypto_hmac_scalar_function.SetFallible();
         CreateScalarFunctionInfo crypto_hmac_info(crypto_hmac_scalar_function);
         crypto_hmac_info.descriptions.push_back({
@@ -642,7 +650,7 @@ namespace duckdb
         // crypto_random_bytes: Generates cryptographically secure random bytes
         auto crypto_random_bytes_scalar_function = ScalarFunction(
             "crypto_random_bytes",
-            {LogicalType::BIGINT}, LogicalType::BLOB, CryptoScalarRandomBytesFun);
+            {Positional("length", LogicalType::BIGINT)}, LogicalType::BLOB, CryptoScalarRandomBytesFun);
         crypto_random_bytes_scalar_function.SetVolatile();
         crypto_random_bytes_scalar_function.SetFallible();
         CreateScalarFunctionInfo crypto_random_bytes_info(crypto_random_bytes_scalar_function);
@@ -693,7 +701,7 @@ namespace duckdb
         });
         loader.RegisterFunction(crypto_hash_agg_info);
 
-        QueryFarmSendTelemetry(loader, "crypto", "2026102001");
+        QueryFarmSendTelemetry(loader, "crypto", "2026102101");
     }
 
     void CryptoExtension::Load(ExtensionLoader &loader)
