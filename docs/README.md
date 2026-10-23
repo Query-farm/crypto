@@ -7,22 +7,15 @@
   </a>
 </p>
 
-# Crypto Hash/HMAC Extension for DuckDB
+# Crypto Extension for DuckDB
 
-[![DuckDB](https://img.shields.io/badge/DuckDB-community_extension-fdf1e0?logo=duckdb&logoColor=fff000)](https://duckdb.org/community_extensions/extensions/crypto.html)
-[![v1.5 build](https://github.com/Query-farm/crypto/actions/workflows/MainDistributionPipeline.yml/badge.svg?branch=v1.5)](https://github.com/Query-farm/crypto/actions/workflows/MainDistributionPipeline.yml?query=branch%3Av1.5)
+[![DuckDB](https://img.shields.io/badge/DuckDB-extension-fdf1e0?logo=duckdb&logoColor=fff000)](https://query.farm/products/extensions/crypto/)
+[![v2.0 build](https://github.com/Query-farm/crypto/actions/workflows/MainDistributionPipeline.yml/badge.svg?branch=v2.0)](https://github.com/Query-farm/crypto/actions/workflows/MainDistributionPipeline.yml?query=branch%3Av2.0)
 
-This extension, `crypto`, adds cryptographic hash functions, HMAC (Hash-based Message Authentication Code) calculation, and cryptographically secure random byte generation to DuckDB.
+Compute cryptographic hashes and HMACs, and generate secure random bytes in DuckDB.
 
 ## Documentation
 
 Full documentation, including installation, usage, the function reference, and cookbook examples, is available at:
 
-**[https://query.farm/products/extensions/crypto](https://query.farm/products/extensions/crypto)**
-
-## Installation
-
-```sql
-INSTALL crypto FROM community;
-LOAD crypto;
-```
+**[https://query.farm/products/extensions/crypto/](https://query.farm/products/extensions/crypto/)**
