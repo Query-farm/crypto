@@ -1,0 +1,66 @@
+# name: test/sql/crypto_memory_limit.test
+# description: Large outputs and KDF working memory count against memory_limit
+# group: [crypto]
+
+require crypto
+
+statement ok
+SET memory_limit = '100MB';
+
+statement ok
+SET threads = 1;
+
+# Random bytes are allocated through DuckDB's buffer allocator
+statement error
+SELECT octet_length(crypto_random_bytes(500000000));
+----
+Out of Memory Error
+
+statement error
+SELECT octet_length(crypto_hash_xof('shake256', 'abc', 500000000));
+----
+Out of Memory Error
+
+# scrypt working memory (128 * n * r bytes, 1 GiB here) is reserved before OpenSSL allocates it
+statement error
+SELECT crypto_scrypt('password', 'salt', 1048576, 8, 1, 32);
+----
+Out of Memory Error
+
+# argon2 working memory (memory_kib) is reserved as well
+statement error
+SELECT crypto_argon2('argon2id', 'password', 'somesalt', 1, 1048576, 1, 32);
+----
+Out of Memory Error
+
+# Within the limit everything works, and the reservations are released afterwards
+query I
+SELECT octet_length(crypto_random_bytes(10000000));
+----
+10000000
+
+query I
+SELECT octet_length(crypto_scrypt('password', 'salt', 16384, 8, 1, 32));
+----
+32
+
+query I
+SELECT octet_length(crypto_argon2('argon2id', 'password', 'somesalt', 1, 32768, 1, 32));
+----
+32
+
+query I
+SELECT sum(octet_length(crypto_scrypt('password', 'salt' || i, 16384, 8, 1, 32))) FROM range(20) r(i);
+----
+640
+
+query I
+SELECT sum(octet_length(crypto_random_bytes(1000000))) FROM range(50);
+----
+50000000
+
+# Aggregate states over many groups also stay within the limit
+query I
+SELECT count(*) FROM (SELECT i % 10000 g, crypto_hash_agg('sha2-256', i ORDER BY i) FROM range(200000) r(i) GROUP BY g);
+----
+10000

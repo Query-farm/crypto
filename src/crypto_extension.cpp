@@ -6,18 +6,21 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/function/table_function.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <duckdb/parser/parsed_data/create_aggregate_function_info.hpp>
+#include <duckdb/parser/parsed_data/create_table_function_info.hpp>
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/array_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
 #include "duckdb/common/vector/unified_vector_format.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/execution/expression_executor_state.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
+#include "duckdb/optimizer/aggregate_rewrite.hpp"
+#include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include <openssl/evp.h>
-#include <algorithm>
-#include <cctype>
-#include <unordered_map>
-#include <functional>
 #include "blake3.h"
 
 #include "query_farm_telemetry.hpp"
@@ -26,272 +29,252 @@ namespace duckdb
 {
     namespace
     {
-        // RAII wrapper for EVP_MD_CTX
-        class EVPContext
+        // Upper bound on the memory OpenSSL allocates for one digest context, reserved against memory_limit
+        constexpr idx_t EVP_CONTEXT_RESERVATION = 512;
+
+        constexpr const char *HASH_AGG_ORDER_ERROR =
+            "Hash aggregation requires a distinct total ordering, example: crypto_hash_agg('blake3', data ORDER BY "
+            "data) columns in group by clauses are not sufficient";
+
+        bool IsStringType(const LogicalType &type)
+        {
+            return type.InternalType() == PhysicalType::VARCHAR;
+        }
+
+        //! Prepares a crypto_hash() value argument (scalar, LIST or ARRAY) and hashes one row of it
+        class HashValueInput
         {
         public:
-            EVPContext()
+            explicit HashValueInput(Vector &vector) : type(vector.GetType())
             {
-                ctx = EVP_MD_CTX_new();
-                if (ctx == nullptr)
+                CryptoValueEncoder::Validate(type, true);
+                vector.ToUnifiedFormat(data);
+                if (type.id() == LogicalTypeId::LIST)
                 {
-                    throw InternalException("Failed to create hash context");
+                    child_type = &ListType::GetChildType(type);
+                    ListVector::GetChild(vector).ToUnifiedFormat(child_data);
+                }
+                else if (type.id() == LogicalTypeId::ARRAY)
+                {
+                    child_type = &ArrayType::GetChildType(type);
+                    array_size = ArrayType::GetSize(type);
+                    ArrayVector::GetChild(vector).ToUnifiedFormat(child_data);
                 }
             }
 
-            ~EVPContext()
+            //! Returns the unified index of row i, or invalid when the row is NULL
+            optional_idx RowIndex(idx_t i) const
             {
-                if (ctx)
+                auto idx = data.sel->get_index(i);
+                if (!data.validity.RowIsValid(idx))
                 {
-                    EVP_MD_CTX_free(ctx);
+                    return optional_idx();
                 }
+                return idx;
             }
 
-            EVPContext(const EVPContext &) = delete;
-            EVPContext &operator=(const EVPContext &) = delete;
-
-            void Init(const EVP_MD *md)
+            template <class HASHER>
+            void Hash(HASHER &hasher, idx_t idx) const
             {
-                if (EVP_DigestInit_ex(ctx, md, nullptr) != 1)
+                if (!child_type)
                 {
-                    throw InternalException("Failed to initialize hash context");
+                    CryptoValueEncoder::Encode(hasher, type, data, idx, false);
+                    return;
+                }
+                idx_t offset;
+                idx_t length;
+                if (type.id() == LogicalTypeId::LIST)
+                {
+                    auto &entry = UnifiedVectorFormat::GetData<list_entry_t>(data)[idx];
+                    offset = entry.offset;
+                    length = entry.length;
+                }
+                else
+                {
+                    offset = idx * array_size;
+                    length = array_size;
+                }
+                for (idx_t j = 0; j < length; j++)
+                {
+                    auto child_idx = child_data.sel->get_index(offset + j);
+                    if (!child_data.validity.RowIsValid(child_idx))
+                    {
+                        throw InvalidInputException(
+                            "Unsupported type for crypto_hash: NULL elements inside lists are not supported");
+                    }
+                    CryptoValueEncoder::Encode(hasher, *child_type, child_data, child_idx, true);
                 }
             }
-
-            void Update(const void *data, size_t len)
-            {
-                if (EVP_DigestUpdate(ctx, data, len) != 1)
-                {
-                    throw InternalException("Failed to update hash");
-                }
-            }
-
-            void Finalize(unsigned char *result, unsigned int &result_len)
-            {
-                if (EVP_DigestFinal_ex(ctx, result, &result_len) != 1)
-                {
-                    throw InternalException("Failed to finalize hash");
-                }
-            }
-
-            EVP_MD_CTX *Get() { return ctx; }
 
         private:
-            EVP_MD_CTX *ctx;
+            const LogicalType &type;
+            UnifiedVectorFormat data;
+            optional_ptr<const LogicalType> child_type;
+            UnifiedVectorFormat child_data;
+            idx_t array_size = 0;
         };
 
-        // Helper to hash a single list element with Blake3
-        void HashListElementBlake3(blake3_hasher &hasher, const LogicalType &child_type,
-                                   UnifiedVectorFormat &child_format, idx_t child_idx)
+        struct CryptoHashLocalState : public FunctionLocalState
         {
-            if (child_type == LogicalType::VARCHAR || child_type == LogicalType::BLOB)
-            {
-                auto child_strings = UnifiedVectorFormat::GetData<string_t>(child_format);
-                auto &str_val = child_strings[child_idx];
-                auto str_len = str_val.GetSize();
+            CryptoAlgorithmCache algorithms;
+            CryptoHasher hasher;
+        };
 
-                uint64_t len_val = static_cast<uint64_t>(str_len);
-                blake3_hasher_update(&hasher, &len_val, sizeof(len_val));
-                blake3_hasher_update(&hasher, str_val.GetData(), str_len);
-            }
-            else if (child_type.IsValid() && child_type.InternalType() != PhysicalType::INVALID)
-            {
-                auto type_size = GetTypeIdSize(child_type.InternalType());
-                auto data_ptr = reinterpret_cast<const char *>(child_format.data) + (child_idx * type_size);
-                blake3_hasher_update(&hasher, data_ptr, type_size);
-            }
-            else
-            {
-                throw InvalidInputException("Unsupported child type in list for crypto_hash");
-            }
+        struct CryptoHmacLocalState : public FunctionLocalState
+        {
+            CryptoAlgorithmCache algorithms;
+            CryptoHmacContext hmac;
+        };
+
+        template <class STATE>
+        unique_ptr<FunctionLocalState> InitLocalState(ExpressionState &state, const BoundFunctionExpression &expr,
+                                                      FunctionData *bind_data)
+        {
+            return make_uniq<STATE>();
         }
 
-        // Helper to hash a single list element with EVP
-        void HashListElementEVP(EVPContext &evp_ctx, const LogicalType &child_type,
-                                UnifiedVectorFormat &child_format, idx_t child_idx)
+        template <class STATE>
+        STATE &GetLocalState(ExpressionState &state)
         {
-            if (child_type == LogicalType::VARCHAR || child_type == LogicalType::BLOB)
-            {
-                auto child_strings = UnifiedVectorFormat::GetData<string_t>(child_format);
-                auto &str_val = child_strings[child_idx];
-                auto str_len = str_val.GetSize();
+            return ExecuteFunctionState::GetFunctionState(state)->Cast<STATE>();
+        }
 
-                uint64_t len_val = static_cast<uint64_t>(str_len);
-                evp_ctx.Update(&len_val, sizeof(len_val));
-                evp_ctx.Update(str_val.GetData(), str_len);
-            }
-            else if (child_type.IsValid() && child_type.InternalType() != PhysicalType::INVALID)
+        bool AllConstant(DataChunk &args)
+        {
+            for (auto &vector : args.data)
             {
-                auto type_size = GetTypeIdSize(child_type.InternalType());
-                auto data_ptr = reinterpret_cast<const char *>(child_format.data) + (child_idx * type_size);
-                evp_ctx.Update(data_ptr, type_size);
+                if (vector.GetVectorType() != VectorType::CONSTANT_VECTOR)
+                {
+                    return false;
+                }
             }
-            else
+            return true;
+        }
+
+        //! Evaluates only the first row when every argument is constant
+        void FinishResult(DataChunk &args, Vector &result, bool all_constant)
+        {
+            if (all_constant)
             {
-                throw InvalidInputException("Unsupported child type in list for crypto_hash");
+                result.SetVectorType(VectorType::CONSTANT_VECTOR);
             }
         }
-    }
+    } // namespace
 
     inline void CryptoScalarHashFun(DataChunk &args, ExpressionState &state, Vector &result)
     {
-        auto &hash_name_vector = args.data[0];
-        auto &value_vector = args.data[1];
-        auto count = args.size();
+        auto &lstate = GetLocalState<CryptoHashLocalState>(state);
+        auto &hasher = lstate.hasher;
+        const bool all_constant = AllConstant(args);
+        const idx_t count = all_constant ? 1 : args.size();
 
-        // Get unified format for both vectors
         UnifiedVectorFormat hash_name_data;
-        UnifiedVectorFormat value_data;
-        hash_name_vector.ToUnifiedFormat(hash_name_data);
-        value_vector.ToUnifiedFormat(value_data);
-
+        args.data[0].ToUnifiedFormat(hash_name_data);
         auto hash_names = UnifiedVectorFormat::GetData<string_t>(hash_name_data);
-        auto &value_type = value_vector.GetType();
+        HashValueInput input(args.data[1]);
 
         auto results = FlatVector::GetDataMutable<string_t>(result);
-
-        // Process each row
         for (idx_t i = 0; i < count; i++)
         {
             auto hash_idx = hash_name_data.sel->get_index(i);
-            auto value_idx = value_data.sel->get_index(i);
-
-            if (!hash_name_data.validity.RowIsValid(hash_idx) || !value_data.validity.RowIsValid(value_idx))
+            auto value_idx = input.RowIndex(i);
+            if (!hash_name_data.validity.RowIsValid(hash_idx) || !value_idx.IsValid())
             {
                 FlatVector::SetNull(result, i, true);
                 continue;
             }
 
-            string hash_name_str = StringUtil::Lower(hash_names[hash_idx].GetString());
+            auto &algorithm = lstate.algorithms.Lookup(hash_names[hash_idx]);
+            hasher.Init(algorithm);
+            input.Hash(hasher, value_idx.GetIndex());
 
-            unsigned char hash_result[EVP_MAX_MD_SIZE];
-            unsigned int hash_len = 0;
-
-            const EVP_MD *md = LookupAlgorithm(hash_name_str);
-
-            // Handle different input types
-            if (value_type == LogicalType::VARCHAR || value_type == LogicalType::BLOB)
-            {
-                // Handle VARCHAR and BLOB
-                auto values = UnifiedVectorFormat::GetData<string_t>(value_data);
-                auto data_ptr = values[value_idx].GetData();
-                auto data_len = values[value_idx].GetSize();
-                CryptoHash(hash_name_str, data_ptr, data_len, hash_result, hash_len);
-            }
-            else if (value_type.IsNested() && value_type.InternalType() == PhysicalType::LIST)
-            {
-                // Handle LIST types
-                const auto &list_child_type = ListType::GetChildType(value_type);
-
-                // Validate child type - no nested lists, structs, or maps
-                if (list_child_type.IsNested())
-                {
-                    throw InvalidInputException("Unsupported type for crypto_hash: nested types inside of lists are not supported");
-                }
-
-                // Get list data
-                auto list_data = UnifiedVectorFormat::GetData<list_entry_t>(value_data);
-                auto &list_entry = list_data[value_idx];
-
-                // Get the child vector
-                auto &child_vector = ListVector::GetChild(value_vector);
-                UnifiedVectorFormat child_format;
-                child_vector.ToUnifiedFormat(child_format);
-
-                if (hash_name_str == "blake3")
-                {
-                    blake3_hasher hasher;
-                    blake3_hasher_init(&hasher);
-
-                    for (idx_t list_idx = 0; list_idx < list_entry.length; list_idx++)
-                    {
-                        auto child_idx = child_format.sel->get_index(list_entry.offset + list_idx);
-                        if (!child_format.validity.RowIsValid(child_idx))
-                        {
-                            throw InvalidInputException("Unsupported type for crypto_hash: NULL elements inside lists are not supported");
-                        }
-                        HashListElementBlake3(hasher, list_child_type, child_format, child_idx);
-                    }
-
-                    blake3_hasher_finalize(&hasher, hash_result, BLAKE3_OUT_LEN);
-                    hash_len = BLAKE3_OUT_LEN;
-                }
-                else
-                {
-                    EVPContext evp_ctx;
-                    evp_ctx.Init(md);
-
-                    for (idx_t list_idx = 0; list_idx < list_entry.length; list_idx++)
-                    {
-                        auto child_idx = child_format.sel->get_index(list_entry.offset + list_idx);
-                        if (!child_format.validity.RowIsValid(child_idx))
-                        {
-                            throw InvalidInputException("Unsupported type for crypto_hash: NULL elements inside lists are not supported");
-                        }
-                        HashListElementEVP(evp_ctx, list_child_type, child_format, child_idx);
-                    }
-
-                    evp_ctx.Finalize(hash_result, hash_len);
-                }
-            }
-            else if (value_type.id() == LogicalTypeId::STRUCT || value_type.id() == LogicalTypeId::MAP)
-            {
-                // Explicitly reject STRUCT and MAP types
-                throw InvalidInputException("Unsupported type for crypto_hash");
-            }
-            else if (value_type.IsValid() && value_type.InternalType() != PhysicalType::INVALID)
-            {
-                // Handle fixed-length types by getting their raw binary representation
-                auto data = value_data.data;
-                auto type_size = GetTypeIdSize(value_type.InternalType());
-                auto data_ptr = reinterpret_cast<const char *>(data) + (value_idx * type_size);
-                CryptoHash(hash_name_str, data_ptr, type_size, hash_result, hash_len);
-            }
-            else
-            {
-                throw InvalidInputException("Unsupported type for crypto_hash");
-            }
-
-            results[i] = StringVector::AddStringOrBlob(result, string_t(reinterpret_cast<const char *>(hash_result), hash_len));
+            auto output = StringVector::EmptyString(result, algorithm.digest_length);
+            hasher.Finalize(data_ptr_cast(output.GetDataWriteable()));
+            output.Finalize();
+            results[i] = output;
         }
+        FinishResult(args, result, all_constant);
+    }
 
-        if (count == 1)
+    inline void CryptoScalarHashXofFun(DataChunk &args, ExpressionState &state, Vector &result)
+    {
+        auto &lstate = GetLocalState<CryptoHashLocalState>(state);
+        auto &hasher = lstate.hasher;
+        const bool all_constant = AllConstant(args);
+        const idx_t count = all_constant ? 1 : args.size();
+
+        UnifiedVectorFormat hash_name_data;
+        UnifiedVectorFormat length_data;
+        args.data[0].ToUnifiedFormat(hash_name_data);
+        args.data[2].ToUnifiedFormat(length_data);
+        auto hash_names = UnifiedVectorFormat::GetData<string_t>(hash_name_data);
+        auto lengths = UnifiedVectorFormat::GetData<int64_t>(length_data);
+        HashValueInput input(args.data[1]);
+
+        CryptoBlobWriter writer(result, BufferAllocator::Get(state.GetContext()));
+        auto results = FlatVector::GetDataMutable<string_t>(result);
+        for (idx_t i = 0; i < count; i++)
         {
-            result.SetVectorType(VectorType::CONSTANT_VECTOR);
+            auto hash_idx = hash_name_data.sel->get_index(i);
+            auto length_idx = length_data.sel->get_index(i);
+            auto value_idx = input.RowIndex(i);
+            if (!hash_name_data.validity.RowIsValid(hash_idx) || !length_data.validity.RowIsValid(length_idx) ||
+                !value_idx.IsValid())
+            {
+                FlatVector::SetNull(result, i, true);
+                continue;
+            }
+
+            auto &algorithm = lstate.algorithms.Lookup(hash_names[hash_idx]);
+            if (!algorithm.is_xof)
+            {
+                throw InvalidInputException(
+                    "crypto_hash_xof requires an extendable-output algorithm (blake3, shake128, shake256), got '%s'",
+                    algorithm.name);
+            }
+            auto length = lengths[length_idx];
+            if (length <= 0 || length > CRYPTO_MAX_BLOB_BYTES)
+            {
+                throw InvalidInputException("crypto_hash_xof length must be between 1 and %lld bytes",
+                                            static_cast<long long>(CRYPTO_MAX_BLOB_BYTES));
+            }
+
+            hasher.Init(algorithm);
+            input.Hash(hasher, value_idx.GetIndex());
+            auto out = writer.Reserve(static_cast<idx_t>(length));
+            hasher.FinalizeXof(out, static_cast<idx_t>(length));
+            results[i] = writer.Finish();
         }
+        FinishResult(args, result, all_constant);
     }
 
     inline void CryptoScalarHmacFun(DataChunk &args, ExpressionState &state, Vector &result)
     {
-        // This is called with three arguments:
-        // 1. The hash function name
-        // 2. The key
-        // 3. The value
-        //
-        // The return value is the binary HMAC.
-        auto &hash_function_name_vector = args.data[0];
-        auto &key_vector = args.data[1];
-        auto &value_vector = args.data[2];
+        auto &lstate = GetLocalState<CryptoHmacLocalState>(state);
 
         TernaryExecutor::Execute<string_t, string_t, string_t, string_t>(
-            hash_function_name_vector, key_vector, value_vector, result,
+            args.data[0], args.data[1], args.data[2], result,
             [&](string_t hash_function_name, string_t key, string_t value)
             {
-                string hash_name_str(hash_function_name.GetData(), hash_function_name.GetSize());
-                string key_str(key.GetData(), key.GetSize());
-                string value_str(value.GetData(), value.GetSize());
-
-                unsigned char hmac_result[EVP_MAX_MD_SIZE];
-                unsigned int hmac_len = 0;
-                CryptoHmac(hash_name_str, key_str, value_str, hmac_result, hmac_len);
-
-                return StringVector::AddStringOrBlob(result, string_t(reinterpret_cast<const char *>(hmac_result), hmac_len));
+                auto &algorithm = lstate.algorithms.Lookup(hash_function_name);
+                auto output = StringVector::EmptyString(result, algorithm.digest_length);
+                lstate.hmac.Compute(algorithm, key.GetData(), key.GetSize(), value.GetData(), value.GetSize(),
+                                    data_ptr_cast(output.GetDataWriteable()));
+                output.Finalize();
+                return output;
             });
+    }
+
+    inline void CryptoScalarEqualsFun(DataChunk &args, ExpressionState &state, Vector &result)
+    {
+        BinaryExecutor::Execute<string_t, string_t, bool>(
+            args.data[0], args.data[1], result,
+            [&](string_t a, string_t b)
+            { return CryptoConstantTimeEquals(a.GetData(), a.GetSize(), b.GetData(), b.GetSize()); });
     }
 
     inline void CryptoScalarRandomBytesFun(DataChunk &args, ExpressionState &state, Vector &result)
     {
-        // This is called with one argument: the number of bytes to generate
         auto &length_vector = args.data[0];
         auto count = args.size();
 
@@ -299,9 +282,10 @@ namespace duckdb
         length_vector.ToUnifiedFormat(length_data);
         auto lengths = UnifiedVectorFormat::GetData<int64_t>(length_data);
 
+        // Large outputs go through DuckDB's buffer allocator so they count against memory_limit
+        CryptoBlobWriter writer(result, BufferAllocator::Get(state.GetContext()));
         auto results = FlatVector::GetDataMutable<string_t>(result);
 
-        // Process each row
         for (idx_t i = 0; i < count; i++)
         {
             auto length_idx = length_data.sel->get_index(i);
@@ -313,21 +297,14 @@ namespace duckdb
             }
 
             int64_t length = lengths[length_idx];
-
-            // Validate length before allocation to prevent allocation issues
             ValidateRandomBytesLength(length);
 
-            // Allocate buffer for random bytes
-            auto buffer = std::unique_ptr<unsigned char[]>(new unsigned char[length]);
-
-            // Generate random bytes
-            CryptoRandomBytes(length, buffer.get());
-
-            // Add result as BLOB
-            results[i] = StringVector::AddStringOrBlob(result, string_t(reinterpret_cast<const char *>(buffer.get()), length));
+            auto out = writer.Reserve(static_cast<idx_t>(length));
+            CryptoRandomBytes(length, out);
+            results[i] = writer.Finish();
         }
 
-        if (count == 1)
+        if (count == 1 && length_vector.GetVectorType() == VectorType::CONSTANT_VECTOR)
         {
             result.SetVectorType(VectorType::CONSTANT_VECTOR);
         }
@@ -335,49 +312,96 @@ namespace duckdb
 
     struct HashAggregateState
     {
-        bool is_touched;
+        //! Kept inline: ordered aggregates re-initialize one state per group, so allocating would accumulate
         blake3_hasher b3_hasher;
+        //! Allocated by OpenSSL, with EVP_CONTEXT_RESERVATION bytes reserved against memory_limit
         EVP_MD_CTX *ctx;
-
-        HashAggregateState()
-        {
-            is_touched = false;
-            blake3_hasher_init(&b3_hasher);
-            ctx = nullptr;
-        }
+        bool is_touched;
     };
 
     struct HashAggregateBindData : public FunctionData
     {
-        explicit HashAggregateBindData(bool is_blake_3, const EVP_MD *md) : is_blake3(is_blake_3), md(md)
+        HashAggregateBindData(const CryptoHashAlgorithm &algorithm, LogicalType value_type,
+                              BufferManager &buffer_manager)
+            : algorithm(algorithm), value_type(std::move(value_type)), buffer_manager(buffer_manager)
         {
         }
 
         unique_ptr<FunctionData> Copy() const override
         {
-            return make_uniq<HashAggregateBindData>(is_blake3, md);
+            return make_uniq<HashAggregateBindData>(algorithm, value_type, buffer_manager);
         }
 
         bool Equals(const FunctionData &other_p) const override
         {
             auto &other = other_p.Cast<HashAggregateBindData>();
-            return md == other.md && is_blake3 == other.is_blake3;
+            return &algorithm == &other.algorithm && value_type == other.value_type;
         }
 
-        const bool is_blake3;
-        const EVP_MD *md;
+        bool IsBlake3() const
+        {
+            return algorithm.backend == CryptoHashBackend::BLAKE3;
+        }
+
+        const CryptoHashAlgorithm &algorithm;
+        const LogicalType value_type;
+        BufferManager &buffer_manager;
     };
 
-    template <class STATE_DATA_TYPE>
+    //! Adapts an aggregate state to the Update() interface used by CryptoValueEncoder
+    struct HashAggregateUpdater
+    {
+        HashAggregateUpdater(HashAggregateState &state, const HashAggregateBindData &bind_data)
+            : state(state), is_blake3(bind_data.IsBlake3())
+        {
+            if (state.is_touched)
+            {
+                return;
+            }
+            if (is_blake3)
+            {
+                blake3_hasher_init(&state.b3_hasher);
+            }
+            else
+            {
+                bind_data.buffer_manager.ReserveMemory(EVP_CONTEXT_RESERVATION);
+                state.ctx = EVP_MD_CTX_new();
+                if (!state.ctx)
+                {
+                    bind_data.buffer_manager.FreeReservedMemory(EVP_CONTEXT_RESERVATION);
+                    throw InternalException("Failed to create hash context");
+                }
+                if (EVP_DigestInit_ex(state.ctx, bind_data.algorithm.md, nullptr) != 1)
+                {
+                    throw InternalException("Failed to initialize hash context");
+                }
+            }
+            state.is_touched = true;
+        }
+
+        void Update(const void *data, idx_t len)
+        {
+            if (is_blake3)
+            {
+                blake3_hasher_update(&state.b3_hasher, data, len);
+            }
+            else if (EVP_DigestUpdate(state.ctx, data, len) != 1)
+            {
+                throw InternalException("Failed to update hash");
+            }
+        }
+
+        HashAggregateState &state;
+        const bool is_blake3;
+    };
+
     struct HashAggregateOperation
     {
         template <class STATE>
         static void Initialize(STATE &state)
         {
-            // So this may fill the state with random garbage
             state.ctx = nullptr;
             state.is_touched = false;
-            blake3_hasher_init(&state.b3_hasher);
         }
 
         template <class STATE>
@@ -387,6 +411,8 @@ namespace duckdb
             {
                 EVP_MD_CTX_free(state.ctx);
                 state.ctx = nullptr;
+                aggr_input_data.bind_data->Cast<HashAggregateBindData>().buffer_manager.FreeReservedMemory(
+                    EVP_CONTEXT_RESERVATION);
             }
         }
 
@@ -395,164 +421,123 @@ namespace duckdb
             return false;
         }
 
-        template <class A_TYPE, class STATE, class OP>
-        static void Operation(STATE &state, const A_TYPE &a_data, AggregateUnaryInput &idata)
-        {
-            // So determine the bind data.
-            auto &bind_data = idata.input.bind_data->Cast<HashAggregateBindData>();
-
-            if (bind_data.is_blake3)
-            {
-                if (!state.is_touched)
-                {
-                    blake3_hasher_init(&state.b3_hasher);
-                    state.is_touched = true;
-                }
-
-                // hash the record length as well to prevent length extension attacks
-                if constexpr (std::is_same_v<A_TYPE, string_t>)
-                {
-                    const uint64_t size = a_data.GetSize();
-                    blake3_hasher_update(&state.b3_hasher, &size, sizeof(uint64_t));
-                    blake3_hasher_update(&state.b3_hasher, a_data.GetDataUnsafe(), size);
-                }
-                else
-                {
-                    blake3_hasher_update(&state.b3_hasher, &a_data, sizeof(a_data));
-                }
-            }
-            else
-            {
-                if (!state.is_touched)
-                {
-                    state.ctx = EVP_MD_CTX_new();
-                    if (EVP_DigestInit_ex(state.ctx, bind_data.md, nullptr) != 1)
-                    {
-                        throw InternalException("Failed to initialize hash context");
-                    }
-                    state.is_touched = true;
-                }
-
-                if constexpr (std::is_same_v<A_TYPE, string_t>)
-                {
-                    const uint64_t size = a_data.GetSize();
-                    if (EVP_DigestUpdate(state.ctx, &size, sizeof(uint64_t)) != 1)
-                    {
-                        throw InternalException("Failed to update hash");
-                    }
-
-                    if (EVP_DigestUpdate(state.ctx, a_data.GetDataUnsafe(), size) != 1)
-                    {
-                        throw InternalException("Failed to update hash");
-                    }
-                }
-                else
-                {
-                    if (EVP_DigestUpdate(state.ctx, &a_data, sizeof(a_data)) != 1)
-                    {
-                        throw InternalException("Failed to update hash");
-                    }
-                }
-            }
-        }
-
-        template <class INPUT_TYPE, class STATE, class OP>
-        static void ConstantOperation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &unary_input,
-                                      idx_t count)
-        {
-            for (idx_t i = 0; i < count; i++)
-            {
-                Operation<INPUT_TYPE, STATE, OP>(state, input, unary_input);
-            }
-        }
-
         template <class STATE, class OP>
         static void Combine(const STATE &source, STATE &target, AggregateInputData &aggr_input_data)
         {
-            auto &bind_data = aggr_input_data.bind_data->Cast<HashAggregateBindData>();
-            const bool source_used = source.is_touched;
-            const bool target_used = target.is_touched;
-
-            if (source_used && !target_used)
+            if (!source.is_touched)
             {
-                if (bind_data.is_blake3)
-                {
-                    target.b3_hasher = source.b3_hasher;
-                }
-                else
-                {
-                    target.ctx = EVP_MD_CTX_new();
-                    if (target.ctx == nullptr)
-                    {
-                        throw InternalException("Failed to create hash context");
-                    }
-                    if (EVP_MD_CTX_copy_ex(target.ctx, source.ctx) != 1)
-                    {
-                        throw InternalException("Failed to copy hash context");
-                    }
-                }
-                target.is_touched = true;
-            }
-            else if (!source_used)
-            {
-                // nothing to do
                 return;
             }
-            throw InvalidInputException("Hash aggregation requires a distinct total ordering, example: crypto_hash_agg('blake3', data ORDER BY "
-                                        "data) columns in group by clauses are not sufficient");
+            if (target.is_touched)
+            {
+                // Two partial hashes cannot be merged: the input must arrive in one ordered stream
+                throw InvalidInputException(HASH_AGG_ORDER_ERROR);
+            }
+            auto &bind_data = aggr_input_data.bind_data->Cast<HashAggregateBindData>();
+            if (bind_data.IsBlake3())
+            {
+                target.b3_hasher = source.b3_hasher;
+            }
+            else
+            {
+                bind_data.buffer_manager.ReserveMemory(EVP_CONTEXT_RESERVATION);
+                target.ctx = EVP_MD_CTX_new();
+                if (!target.ctx)
+                {
+                    bind_data.buffer_manager.FreeReservedMemory(EVP_CONTEXT_RESERVATION);
+                    throw InternalException("Failed to create hash context");
+                }
+                if (EVP_MD_CTX_copy_ex(target.ctx, source.ctx) != 1)
+                {
+                    throw InternalException("Failed to copy hash context");
+                }
+            }
+            target.is_touched = true;
         }
 
         template <class T, class STATE>
         static void Finalize(STATE &state, T &target, AggregateFinalizeData &finalize_data)
         {
-            auto &bind_data = finalize_data.input.bind_data->Cast<HashAggregateBindData>();
-            if (bind_data.is_blake3)
+            if (!state.is_touched)
             {
-                if (!state.is_touched)
-                {
-                    finalize_data.ReturnNull();
-                    return;
-                }
-                char output[BLAKE3_OUT_LEN];
-                blake3_hasher_finalize(&state.b3_hasher, reinterpret_cast<uint8_t *>(&output), BLAKE3_OUT_LEN);
-                target = StringVector::AddStringOrBlob(finalize_data.result, reinterpret_cast<const char *>(&output),
-                                                       BLAKE3_OUT_LEN);
+                finalize_data.ReturnNull();
+                return;
+            }
+            auto &bind_data = finalize_data.input.bind_data->Cast<HashAggregateBindData>();
+            auto &algorithm = bind_data.algorithm;
+            target = StringVector::EmptyString(finalize_data.result, algorithm.digest_length);
+            auto out = data_ptr_cast(target.GetDataWriteable());
+            if (bind_data.IsBlake3())
+            {
+                // Finalizing does not modify the hasher, so window frames can finalize repeatedly
+                blake3_hasher_finalize(&state.b3_hasher, out, BLAKE3_OUT_LEN);
             }
             else
             {
-                if (!state.ctx)
+                // Finalize a copy so the state stays usable if it is finalized again
+                auto copy = EVP_MD_CTX_new();
+                if (!copy || EVP_MD_CTX_copy_ex(copy, state.ctx) != 1)
                 {
-                    finalize_data.ReturnNull();
-                    return;
+                    EVP_MD_CTX_free(copy);
+                    throw InternalException("Failed to copy hash context");
                 }
-
-                unsigned char hash_result[EVP_MAX_MD_SIZE];
-                unsigned int hash_len = 0;
-                // Finalize the hash
-                if (EVP_DigestFinal_ex(state.ctx, hash_result, &hash_len) != 1)
+                int rc;
+                if (algorithm.is_xof)
+                {
+                    rc = EVP_DigestFinalXOF(copy, out, algorithm.digest_length);
+                }
+                else
+                {
+                    unsigned int len = 0;
+                    rc = EVP_DigestFinal_ex(copy, out, &len);
+                }
+                EVP_MD_CTX_free(copy);
+                if (rc != 1)
                 {
                     throw InternalException("Failed to finalize hash");
                 }
-                target = StringVector::AddStringOrBlob(finalize_data.result, reinterpret_cast<const char *>(&hash_result),
-                                                       hash_len);
             }
+            target.Finalize();
         }
     };
+
+    static void HashAggScatterUpdate(Vector inputs[], AggregateInputData &aggr_input_data, idx_t input_count,
+                                     Vector &states, idx_t count)
+    {
+        D_ASSERT(input_count == 2);
+        auto &bind_data = aggr_input_data.bind_data->Cast<HashAggregateBindData>();
+
+        UnifiedVectorFormat input_data;
+        UnifiedVectorFormat state_data;
+        inputs[1].ToUnifiedFormat(input_data);
+        states.ToUnifiedFormat(state_data);
+        auto state_ptrs = UnifiedVectorFormat::GetData<HashAggregateState *>(state_data);
+
+        for (idx_t i = 0; i < count; i++)
+        {
+            auto input_idx = input_data.sel->get_index(i);
+            if (!input_data.validity.RowIsValid(input_idx))
+            {
+                throw InvalidInputException("crypto_hash_agg does not support NULL values, filter them out with "
+                                            "FILTER (WHERE value IS NOT NULL)");
+            }
+            auto &state = *state_ptrs[state_data.sel->get_index(i)];
+            HashAggregateUpdater updater(state, bind_data);
+            CryptoValueEncoder::Encode(updater, bind_data.value_type, input_data, input_idx, true);
+        }
+    }
 
     unique_ptr<FunctionData> HashAggregateBind(BindAggregateFunctionInput &input)
     {
         auto &context = input.GetClientContext();
         auto &arguments = input.GetArguments();
-        // The first argument is the hash algorithm name
-        bool is_blake3 = false;
-        const EVP_MD *md = nullptr;
 
         if (arguments.size() != 2)
         {
-            throw InvalidInputException("crypto_hash_agg requires at least two arguments: algorithm name and data");
+            throw InvalidInputException("crypto_hash_agg requires two arguments: algorithm name and data");
         }
 
-        if (arguments[0]->HasParameter())
+        if (arguments[0]->HasParameter() || arguments[1]->HasParameter())
         {
             throw ParameterNotResolvedException();
         }
@@ -566,35 +551,36 @@ namespace duckdb
             throw BinderException("crypto_hash_agg hash algorithm name cannot be NULL");
         }
 
-        auto cached_hash_name = hash_algo_value.GetValue<std::string>();
-        std::transform(cached_hash_name.begin(), cached_hash_name.end(), cached_hash_name.begin(), ::tolower);
-
-        md = LookupAlgorithm(cached_hash_name);
-        is_blake3 = (md == nullptr);
+        auto &algorithm = LookupAlgorithm(hash_algo_value.GetValue<std::string>());
+        auto value_type = arguments[1]->GetReturnType();
+        if (value_type.id() == LogicalTypeId::LIST || value_type.id() == LogicalTypeId::ARRAY)
+        {
+            throw InvalidInputException("Unsupported type for crypto_hash_agg: %s", value_type.ToString());
+        }
+        CryptoValueEncoder::Validate(value_type, false);
 
         // The algorithm argument stays part of the argument list (DuckDB 2.0 no longer allows erasing
         // arguments); the update callback skips it and reads the data from the second argument.
-        return make_uniq<HashAggregateBindData>(is_blake3, md);
+        return make_uniq<HashAggregateBindData>(algorithm, std::move(value_type),
+                                                BufferManager::GetBufferManager(context));
     }
 
-    // Update callback that ignores the leading (constant) algorithm argument and aggregates the second one
-    template <class STATE, class INPUT_TYPE, class OP>
-    static void HashAggScatterUpdate(Vector inputs[], AggregateInputData &aggr_input_data, idx_t input_count,
-                                     Vector &states, idx_t count)
+    //! Rejects crypto_hash_agg without ORDER BY; runs from the optimizer, which sees the bound ORDER BY clause
+    static unique_ptr<Expression> HashAggregateRequireOrder(AggregateRewriteInput &input)
     {
-        D_ASSERT(input_count == 2);
-        AggregateExecutor::UnaryScatter<STATE, INPUT_TYPE, OP>(inputs[1], states, aggr_input_data, count);
+        if (!input.aggregate.GetOrderBys())
+        {
+            throw InvalidInputException(HASH_AGG_ORDER_ERROR);
+        }
+        return nullptr;
     }
 
-    // Helper function to register a hash aggregate for a given input type
-    template <typename CPP_TYPE>
-    static void RegisterHashAggType(AggregateFunctionSet &agg_set, const LogicalType &logical_type)
+    static AggregateFunction GetHashAggregateFunction()
     {
-        using OP = HashAggregateOperation<HashAggregateState>;
-        AggregateFunction agg_func({LogicalType::VARCHAR, logical_type}, LogicalType::BLOB,
+        using OP = HashAggregateOperation;
+        AggregateFunction agg_func({LogicalType::VARCHAR, LogicalType::ANY}, LogicalType::BLOB,
                                    AggregateFunction::StateSize<HashAggregateState>,
-                                   AggregateFunction::StateInitialize<HashAggregateState, OP>,
-                                   HashAggScatterUpdate<HashAggregateState, CPP_TYPE, OP>,
+                                   AggregateFunction::StateInitialize<HashAggregateState, OP>, HashAggScatterUpdate,
                                    AggregateFunction::StateCombine<HashAggregateState, OP>,
                                    AggregateFunction::StateFinalize<HashAggregateState, string_t, OP>,
                                    FunctionNullHandling::DEFAULT_NULL_HANDLING);
@@ -605,8 +591,62 @@ namespace duckdb
         agg_func.SetOrderDependent(AggregateOrderDependent::ORDER_DEPENDENT);
         agg_func.SetDistinctDependent(AggregateDistinctDependent::DISTINCT_DEPENDENT);
         agg_func.SetBindCallback(HashAggregateBind);
+        agg_func.SetDirectRewriteCallback(HashAggregateRequireOrder);
+        // Partial hashes cannot be merged, so window frames must not be built from a segment tree
+        agg_func.SetIsHolistic(true);
         agg_func.SetFallible();
-        agg_set.AddFunction(agg_func);
+        return agg_func;
+    }
+
+    struct CryptoAlgorithmsState : public GlobalTableFunctionState
+    {
+        idx_t offset = 0;
+    };
+
+    static unique_ptr<FunctionData> CryptoAlgorithmsBind(ClientContext &context, TableFunctionBindInput &input,
+                                                         vector<LogicalType> &return_types, vector<Identifier> &names)
+    {
+        names.emplace_back("name");
+        return_types.emplace_back(LogicalType::VARCHAR);
+        names.emplace_back("family");
+        return_types.emplace_back(LogicalType::VARCHAR);
+        names.emplace_back("implementation");
+        return_types.emplace_back(LogicalType::VARCHAR);
+        names.emplace_back("digest_length");
+        return_types.emplace_back(LogicalType::INTEGER);
+        names.emplace_back("is_xof");
+        return_types.emplace_back(LogicalType::BOOLEAN);
+        names.emplace_back("supports_hmac");
+        return_types.emplace_back(LogicalType::BOOLEAN);
+        names.emplace_back("available");
+        return_types.emplace_back(LogicalType::BOOLEAN);
+        return nullptr;
+    }
+
+    static unique_ptr<GlobalTableFunctionState> CryptoAlgorithmsInit(ClientContext &context,
+                                                                     TableFunctionInitInput &input)
+    {
+        return make_uniq<CryptoAlgorithmsState>();
+    }
+
+    static void CryptoAlgorithmsFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output)
+    {
+        auto &state = data_p.global_state->Cast<CryptoAlgorithmsState>();
+        auto &algorithms = GetHashAlgorithms();
+        idx_t count = 0;
+        while (state.offset < algorithms.size() && count < STANDARD_VECTOR_SIZE)
+        {
+            auto &algorithm = algorithms[state.offset++];
+            output.data[0].Append(Value(algorithm.name));
+            output.data[1].Append(Value(algorithm.family));
+            output.data[2].Append(Value(algorithm.backend == CryptoHashBackend::BLAKE3 ? "blake3" : "openssl"));
+            output.data[3].Append(algorithm.available ? Value::INTEGER(NumericCast<int32_t>(algorithm.digest_length))
+                                                      : Value(LogicalType::INTEGER));
+            output.data[4].Append(Value::BOOLEAN(algorithm.is_xof));
+            output.data[5].Append(Value::BOOLEAN(algorithm.supports_hmac));
+            output.data[6].Append(Value::BOOLEAN(algorithm.available));
+            count++;
+        }
     }
 
     // Declares a positional-only parameter with a real name, so duckdb_functions() reports it instead of col<N>.
@@ -618,14 +658,15 @@ namespace duckdb
     {
         // crypto_hash: Computes cryptographic hash of data using specified algorithm
         auto crypto_hash_scalar_function = ScalarFunction("crypto_hash", {Positional("algorithm", LogicalType::VARCHAR), Positional("value", LogicalType::ANY)}, LogicalType::BLOB, CryptoScalarHashFun);
+        crypto_hash_scalar_function.SetInitStateCallback(InitLocalState<CryptoHashLocalState>);
         crypto_hash_scalar_function.SetFallible();
         CreateScalarFunctionInfo crypto_hash_info(crypto_hash_scalar_function);
         crypto_hash_info.descriptions.push_back({
             {LogicalType::VARCHAR, LogicalType::ANY},                                // parameter_types
             {"algorithm", "value"},                                                   // parameter_names
             "Computes a cryptographic hash of the input value using the specified algorithm. "
-            "Supported algorithms: blake3, sha2-256, sha2-512, sha3-256, sha3-512, md5, sha1, and more. "
-            "Accepts strings, integers, floats, dates, timestamps, UUIDs, and lists of fixed-length types.",  // description
+            "Run crypto_algorithms() for the supported algorithms. "
+            "Accepts strings, numbers, decimals, enums, dates, timestamps, intervals, UUIDs, and lists or arrays of those.",  // description
             {"crypto_hash('sha2-256', 'hello world')",
              "crypto_hash('blake3', 42)",
              "crypto_hash('sha2-256', [1, 2, 3])"},                                  // examples
@@ -633,19 +674,66 @@ namespace duckdb
         });
         loader.RegisterFunction(crypto_hash_info);
 
+        // crypto_hash_xof: Extendable-output hash with a caller-chosen length
+        auto crypto_hash_xof_scalar_function = ScalarFunction("crypto_hash_xof", {Positional("algorithm", LogicalType::VARCHAR), Positional("value", LogicalType::ANY), Positional("length", LogicalType::BIGINT)}, LogicalType::BLOB, CryptoScalarHashXofFun);
+        crypto_hash_xof_scalar_function.SetInitStateCallback(InitLocalState<CryptoHashLocalState>);
+        crypto_hash_xof_scalar_function.SetFallible();
+        CreateScalarFunctionInfo crypto_hash_xof_info(crypto_hash_xof_scalar_function);
+        crypto_hash_xof_info.descriptions.push_back({
+            {LogicalType::VARCHAR, LogicalType::ANY, LogicalType::BIGINT},           // parameter_types
+            {"algorithm", "value", "length"},                                         // parameter_names
+            "Computes an extendable-output hash (blake3, shake128 or shake256) of the input value, "
+            "producing length bytes of output.",                                      // description
+            {"crypto_hash_xof('shake256', 'hello world', 128)",
+             "crypto_hash_xof('blake3', 'hello world', 64)"},                        // examples
+            {"cryptography", "hash"}                                                  // categories
+        });
+        loader.RegisterFunction(crypto_hash_xof_info);
+
         // crypto_hmac: Computes HMAC of message with key using specified algorithm
-        auto crypto_hmac_scalar_function = ScalarFunction("crypto_hmac", {Positional("algorithm", LogicalType::VARCHAR), Positional("key", LogicalType::VARCHAR), Positional("message", LogicalType::VARCHAR)}, LogicalType::BLOB, CryptoScalarHmacFun);
-        crypto_hmac_scalar_function.SetFallible();
-        CreateScalarFunctionInfo crypto_hmac_info(crypto_hmac_scalar_function);
+        ScalarFunctionSet crypto_hmac_set("crypto_hmac");
+        for (auto &key_type : {LogicalType::VARCHAR, LogicalType::BLOB})
+        {
+            for (auto &message_type : {LogicalType::VARCHAR, LogicalType::BLOB})
+            {
+                ScalarFunction crypto_hmac_scalar_function({Positional("algorithm", LogicalType::VARCHAR), Positional("key", key_type), Positional("message", message_type)}, LogicalType::BLOB, CryptoScalarHmacFun);
+                crypto_hmac_scalar_function.SetInitStateCallback(InitLocalState<CryptoHmacLocalState>);
+                crypto_hmac_scalar_function.SetFallible();
+                crypto_hmac_set.AddFunction(crypto_hmac_scalar_function);
+            }
+        }
+        CreateScalarFunctionInfo crypto_hmac_info(crypto_hmac_set);
         crypto_hmac_info.descriptions.push_back({
             {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},      // parameter_types
             {"algorithm", "key", "message"},                                          // parameter_names
             "Computes an HMAC (Hash-based Message Authentication Code) of the message using the specified "
-            "algorithm and key. Supports all hash algorithms except blake3, which requires exactly 32 bytes for the key.",  // description
+            "algorithm and key. Key and message may be VARCHAR or BLOB. blake3 uses its keyed mode, which "
+            "requires exactly 32 bytes for the key; shake128 and shake256 are not supported.",  // description
             {"crypto_hmac('sha2-256', 'secret_key', 'message to authenticate')"},    // examples
             {"cryptography", "hmac", "authentication"}                                // categories
         });
         loader.RegisterFunction(crypto_hmac_info);
+
+        // crypto_equals: Constant-time comparison, for verifying MACs and hashes
+        ScalarFunctionSet crypto_equals_set("crypto_equals");
+        for (auto &a_type : {LogicalType::VARCHAR, LogicalType::BLOB})
+        {
+            for (auto &b_type : {LogicalType::VARCHAR, LogicalType::BLOB})
+            {
+                ScalarFunction crypto_equals_scalar_function({Positional("a", a_type), Positional("b", b_type)}, LogicalType::BOOLEAN, CryptoScalarEqualsFun);
+                crypto_equals_set.AddFunction(crypto_equals_scalar_function);
+            }
+        }
+        CreateScalarFunctionInfo crypto_equals_info(crypto_equals_set);
+        crypto_equals_info.descriptions.push_back({
+            {LogicalType::BLOB, LogicalType::BLOB},                                  // parameter_types
+            {"a", "b"},                                                               // parameter_names
+            "Compares two values in constant time, so the comparison does not leak how many leading bytes match. "
+            "Use it to verify HMACs and other secrets.",                             // description
+            {"crypto_equals(crypto_hmac('sha2-256', 'key', 'message'), expected_mac)"},  // examples
+            {"cryptography", "authentication"}                                        // categories
+        });
+        loader.RegisterFunction(crypto_equals_info);
 
         // crypto_random_bytes: Generates cryptographically secure random bytes
         auto crypto_random_bytes_scalar_function = ScalarFunction(
@@ -665,41 +753,29 @@ namespace duckdb
         });
         loader.RegisterFunction(crypto_random_bytes_info);
 
-        auto agg_set = AggregateFunctionSet("crypto_hash_agg");
-
-        // Variable-size types (include size prefix to prevent length extension attacks)
-        RegisterHashAggType<string_t>(agg_set, LogicalType::VARCHAR);
-        RegisterHashAggType<string_t>(agg_set, LogicalType::BLOB);
-
-        // Fixed-size integer types
-        RegisterHashAggType<int8_t>(agg_set, LogicalType::TINYINT);
-        RegisterHashAggType<int16_t>(agg_set, LogicalType::SMALLINT);
-        RegisterHashAggType<int32_t>(agg_set, LogicalType::INTEGER);
-        RegisterHashAggType<int64_t>(agg_set, LogicalType::BIGINT);
-        RegisterHashAggType<uint8_t>(agg_set, LogicalType::UTINYINT);
-        RegisterHashAggType<uint16_t>(agg_set, LogicalType::USMALLINT);
-        RegisterHashAggType<uint32_t>(agg_set, LogicalType::UINTEGER);
-        RegisterHashAggType<uint64_t>(agg_set, LogicalType::UBIGINT);
-        RegisterHashAggType<hugeint_t>(agg_set, LogicalType::HUGEINT);
-        RegisterHashAggType<uhugeint_t>(agg_set, LogicalType::UHUGEINT);
-
-        // Fixed-size floating point types
-        RegisterHashAggType<float>(agg_set, LogicalType::FLOAT);
-        RegisterHashAggType<double>(agg_set, LogicalType::DOUBLE);
-
         // crypto_hash_agg: Aggregate function for hashing multiple rows
+        AggregateFunctionSet agg_set("crypto_hash_agg");
+        agg_set.AddFunction(GetHashAggregateFunction());
         CreateAggregateFunctionInfo crypto_hash_agg_info(agg_set);
         crypto_hash_agg_info.descriptions.push_back({
             {LogicalType::VARCHAR, LogicalType::ANY},                                // parameter_types
             {"algorithm", "value"},                                                   // parameter_names
             "Computes a cryptographic hash over multiple rows using the specified algorithm. "
             "ORDER BY is required to ensure deterministic results. Returns the same hash as crypto_hash() "
-            "would for an equivalent ordered list. Returns NULL for empty result sets.",  // description
+            "would for an equivalent ordered list. Returns NULL for empty result sets and errors on NULL values.",  // description
             {"crypto_hash_agg('sha2-256', column_name ORDER BY id)",
              "crypto_hash_agg('blake3', data ORDER BY timestamp)"},                  // examples
             {"cryptography", "hash", "aggregate"}                                     // categories
         });
         loader.RegisterFunction(crypto_hash_agg_info);
+
+        // crypto_algorithms: Lists the hash algorithms and their properties
+        TableFunction crypto_algorithms("crypto_algorithms", {}, CryptoAlgorithmsFunction, CryptoAlgorithmsBind,
+                                        CryptoAlgorithmsInit);
+        CreateTableFunctionInfo crypto_algorithms_info(crypto_algorithms);
+        loader.RegisterFunction(crypto_algorithms_info);
+
+        RegisterKdfFunctions(loader);
 
         QueryFarmSendTelemetry(loader, "crypto", "2026102101");
     }

@@ -1,0 +1,168 @@
+# name: test/sql/crypto_kdf.test
+# description: Key derivation: crypto_pbkdf2, crypto_hkdf, crypto_scrypt and crypto_argon2
+# group: [crypto]
+
+require crypto
+
+# PBKDF2 (RFC 6070 and RFC 7914 vectors)
+# ======================================
+
+query I
+SELECT lower(to_hex(crypto_pbkdf2('sha1', 'password', 'salt', 1, 20)));
+----
+0c60c80f961f0e71f3a9b524af6012062fe037a6
+
+query I
+SELECT lower(to_hex(crypto_pbkdf2('sha1', 'password', 'salt', 4096, 20)));
+----
+4b007901b765489abead49d926f721d065a429c1
+
+query I
+SELECT lower(to_hex(crypto_pbkdf2('sha2-256', 'passwordPASSWORDpassword', 'saltSALTsaltSALTsaltSALTsaltSALTsalt', 4096, 40)));
+----
+348c89dbcbd32b2f32d814b8116e84cf2b17347ebc1800181c4e2a1fb8dd53e1c635518c7dac47e9
+
+# BLOB and VARCHAR arguments give the same result
+query I
+SELECT crypto_pbkdf2('sha2-256', 'password'::BLOB, 'salt', 10, 32) = crypto_pbkdf2('sha2-256', 'password', 'salt'::BLOB, 10, 32);
+----
+true
+
+query I
+SELECT octet_length(crypto_pbkdf2('sha2-512', '', '', 1, 64));
+----
+64
+
+statement error
+SELECT crypto_pbkdf2('sha2-256', 'password', 'salt', 0, 32);
+----
+Invalid Input Error: crypto_pbkdf2: iterations must be between 1 and 4294967295, got 0
+
+statement error
+SELECT crypto_pbkdf2('sha2-256', 'password', 'salt', 1, 0);
+----
+Invalid Input Error: crypto_pbkdf2: length must be between 1 and 1048576, got 0
+
+statement error
+SELECT crypto_pbkdf2('blake3', 'password', 'salt', 1, 32);
+----
+Invalid Input Error: crypto_pbkdf2 does not support hash algorithm 'blake3'
+
+statement error
+SELECT crypto_pbkdf2('nope', 'password', 'salt', 1, 32);
+----
+Invalid Input Error: Invalid hash algorithm 'nope'
+
+# HKDF (RFC 5869 vectors)
+# =======================
+
+query I
+SELECT lower(to_hex(crypto_hkdf('sha2-256', unhex('0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b'), unhex('000102030405060708090a0b0c'), unhex('f0f1f2f3f4f5f6f7f8f9'), 42)));
+----
+3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865
+
+# Test case 3: empty salt and info
+query I
+SELECT lower(to_hex(crypto_hkdf('sha2-256', unhex('0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b'), '', '', 42)));
+----
+8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8
+
+query I
+SELECT lower(to_hex(crypto_hkdf('sha2-512', 'input key', 'salt', 'info', 64)));
+----
+5b053e9f5aae00dd80bf7cbb5b097f7d2295cee4e7a36dc5e6d990aecf726bb5a5e856289e3162157b06280d415b83e2a8b31772d4142d93726806ba6fb82e4f
+
+# The output is limited to 255 digest blocks
+query I
+SELECT octet_length(crypto_hkdf('sha2-256', 'k', 's', 'i', 8160));
+----
+8160
+
+statement error
+SELECT crypto_hkdf('sha2-256', 'k', 's', 'i', 8161);
+----
+Invalid Input Error: crypto_hkdf: length must be between 1 and 8160, got 8161
+
+# scrypt (RFC 7914 vectors)
+# =========================
+
+query I
+SELECT lower(to_hex(crypto_scrypt('', '', 16, 1, 1, 64)));
+----
+77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442fcd0069ded0948f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906
+
+query I
+SELECT lower(to_hex(crypto_scrypt('password', 'NaCl', 1024, 8, 16, 64)));
+----
+fdbabe1c9d3472007856e7190d01e9fe7c6ad7cbc8237830e77376634b3731622eaf30d92e22a3886ff109279d9830dac727afb94a83ee6d8360cbdfa2cc0640
+
+statement error
+SELECT crypto_scrypt('password', 'salt', 1000, 8, 1, 32);
+----
+Invalid Input Error: crypto_scrypt: n must be a power of 2, got 1000
+
+statement error
+SELECT crypto_scrypt('password', 'salt', 1024, 0, 1, 32);
+----
+Invalid Input Error: crypto_scrypt: r must be between 1 and 2147483647, got 0
+
+# Argon2 (reference values from argon2-cffi, version 0x13)
+# ========================================================
+
+query I
+SELECT lower(to_hex(crypto_argon2('argon2id', 'password', 'somesalt', 2, 65536, 4, 32)));
+----
+1a9677b0afe81fda7b548895e7a1bfeb8668ffc19a530e37e088a668fab1c02a
+
+query I
+SELECT lower(to_hex(crypto_argon2('argon2i', 'password', 'somesalt', 2, 65536, 4, 32)));
+----
+20c8adf6a90550b08c03f5628b32f9edc9d32ce6b90e254cf5e330a40bcfc2be
+
+query I
+SELECT lower(to_hex(crypto_argon2('ARGON2D', 'password', 'somesalt', 2, 65536, 4, 32)));
+----
+7199f977eac587e65fb91866da21941a072b5b960b78ceaaecbdef06c766140d
+
+query I
+SELECT lower(to_hex(crypto_argon2('argon2id', '', 'somesalt', 1, 64, 1, 16)));
+----
+83b7ea15e3a517fe0455cbe091d0931c
+
+statement error
+SELECT crypto_argon2('argon2x', 'password', 'somesalt', 1, 64, 1, 32);
+----
+Invalid Input Error: crypto_argon2: variant must be 'argon2id', 'argon2i' or 'argon2d', got 'argon2x'
+
+statement error
+SELECT crypto_argon2('argon2id', 'password', 'somesalt', 1, 16, 4, 32);
+----
+Invalid Input Error: crypto_argon2: memory_kib must be between 32 and 4294967295, got 16
+
+# Argon2 requires a salt of at least 8 bytes
+statement error
+SELECT crypto_argon2('argon2id', 'password', 'short', 1, 64, 1, 32);
+----
+Invalid Input Error: crypto_argon2 failed
+
+# NULLs and per-row parameters
+# ============================
+
+query IIII
+SELECT crypto_pbkdf2('sha2-256', NULL, 'salt', 1, 32) IS NULL,
+       crypto_hkdf('sha2-256', 'k', NULL, 'i', 32) IS NULL,
+       crypto_scrypt('p', 's', 16, 1, 1, NULL) IS NULL,
+       crypto_argon2(NULL, 'p', 'somesalt', 1, 64, 1, 32) IS NULL;
+----
+true	true	true	true
+
+query I
+SELECT count(DISTINCT crypto_pbkdf2('sha2-256', 'password', 'salt' || i, 2, 16)) FROM range(100) r(i);
+----
+100
+
+query I
+SELECT count(*) FROM range(50) r(i)
+WHERE crypto_hkdf('sha2-256', 'key' || i, 'salt', 'info', 32) = crypto_hkdf('sha2-256', ('key' || i)::BLOB, 'salt'::BLOB, 'info'::BLOB, 32);
+----
+50

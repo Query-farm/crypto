@@ -1,0 +1,171 @@
+# name: test/sql/crypto_algorithms.test
+# description: crypto_algorithms(), the added hash algorithms and crypto_hash_xof()
+# group: [crypto]
+
+require crypto
+
+query IIIIII
+SELECT name, family, implementation, digest_length, is_xof, supports_hmac
+FROM crypto_algorithms() WHERE available ORDER BY name;
+----
+blake2b-512	blake2	openssl	64	false	true
+blake2s-256	blake2	openssl	32	false	true
+blake3	blake3	blake3	32	true	true
+keccak224	keccak	openssl	28	false	true
+keccak256	keccak	openssl	32	false	true
+keccak384	keccak	openssl	48	false	true
+keccak512	keccak	openssl	64	false	true
+md5	md	openssl	16	false	true
+ripemd160	ripemd	openssl	20	false	true
+sha1	sha1	openssl	20	false	true
+sha2-224	sha2	openssl	28	false	true
+sha2-256	sha2	openssl	32	false	true
+sha2-384	sha2	openssl	48	false	true
+sha2-512	sha2	openssl	64	false	true
+sha2-512/224	sha2	openssl	28	false	true
+sha2-512/256	sha2	openssl	32	false	true
+sha3-224	sha3	openssl	28	false	true
+sha3-256	sha3	openssl	32	false	true
+sha3-384	sha3	openssl	48	false	true
+sha3-512	sha3	openssl	64	false	true
+shake128	shake	openssl	32	true	false
+shake256	shake	openssl	64	true	false
+sm3	sm3	openssl	32	false	true
+
+# md4 lives in OpenSSL's legacy provider
+query III
+SELECT name, available, digest_length FROM crypto_algorithms() WHERE name = 'md4';
+----
+md4	false	NULL
+
+# Every available algorithm produces digest_length bytes
+query I
+SELECT count(*) FROM crypto_algorithms()
+WHERE available AND octet_length(crypto_hash(name, 'abc')) != digest_length;
+----
+0
+
+# The error for an unknown algorithm lists only available algorithms
+statement error
+SELECT crypto_hash('nope', 'abc');
+----
+<REGEX>:.*Invalid hash algorithm 'nope'. Available algorithms are: blake2b-512, blake2s-256, blake3, keccak224.*
+
+# Keccak-256 of the empty string, as used by Ethereum
+query I
+SELECT lower(to_hex(crypto_hash('keccak256', '')));
+----
+c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470
+
+query I
+SELECT lower(to_hex(crypto_hash('blake2s-256', 'abc')));
+----
+508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982
+
+query I
+SELECT lower(to_hex(crypto_hash('ripemd160', 'abc')));
+----
+8eb208f7e05d987a9b044a8e98c6b087f15a0bfc
+
+query I
+SELECT lower(to_hex(crypto_hash('sha2-512/224', 'abc')));
+----
+4634270f707b6a54daae7530460842e20e37ed265ceee9a43e8924aa
+
+query I
+SELECT lower(to_hex(crypto_hash('sha2-512/256', 'abc')));
+----
+53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7af23
+
+query I
+SELECT lower(to_hex(crypto_hash('sm3', 'abc')));
+----
+66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0
+
+# SHAKE in crypto_hash() uses its full-security default length (32 and 64 bytes)
+query I
+SELECT lower(to_hex(crypto_hash('shake128', 'abc')));
+----
+5881092dd818bf5cf8a3ddb793fbcba74097d5c526a6d35f97b83351940f2cc8
+
+query I
+SELECT lower(to_hex(crypto_hash('shake256', 'abc')));
+----
+483366601360a8771c6863080cc4114d8db44530f8f1e1ee4f94ea37e78b5739d5a15bef186a5386c75744c0527e1faa9f8726e462a12a4feb06bd8801e751e4
+
+# Algorithm names are case-insensitive
+query I
+SELECT crypto_hash('SHA2-512/256', 'abc') = crypto_hash('sha2-512/256', 'abc');
+----
+true
+
+# The algorithm may change from row to row
+query II
+SELECT alg, lower(to_hex(crypto_hash(alg, 'abc'))) FROM (VALUES (1, 'md5'), (2, 'sha1'), (3, 'md5'), (4, 'SHA2-256')) t(i, alg) ORDER BY i;
+----
+md5	900150983cd24fb0d6963f7d28e17f72
+sha1	a9993e364706816aba3e25717850c26c9cd0d89d
+md5	900150983cd24fb0d6963f7d28e17f72
+SHA2-256	ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+
+# crypto_hash_xof
+# ===============
+
+query I
+SELECT lower(to_hex(crypto_hash_xof('shake256', 'abc', 100)));
+----
+483366601360a8771c6863080cc4114d8db44530f8f1e1ee4f94ea37e78b5739d5a15bef186a5386c75744c0527e1faa9f8726e462a12a4feb06bd8801e751e41385141204f329979fd3047a13c5657724ada64d2470157b3cdc288620944d78dbcddbd9
+
+query I
+SELECT lower(to_hex(crypto_hash_xof('blake3', 'abc', 64)));
+----
+6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d851fb250ae7393f5d02813b65d521a0d492d9ba09cf7ce7f4cffd900f23374bf0b
+
+# A shorter XOF output is a prefix of a longer one, and the default length matches crypto_hash()
+query II
+SELECT crypto_hash_xof('blake3', 'abc', 32) = crypto_hash('blake3', 'abc'),
+       crypto_hash_xof('shake128', 'abc', 32) = crypto_hash('shake128', 'abc');
+----
+true	true
+
+query I
+SELECT octet_length(crypto_hash_xof('shake128', 'abc', 1));
+----
+1
+
+# Large outputs (allocated through DuckDB's buffer allocator)
+query I
+SELECT octet_length(crypto_hash_xof('shake128', 'abc', 1000000));
+----
+1000000
+
+query I
+SELECT left(crypto_hash_xof('blake3', 'abc', 100000)::VARCHAR, 20) = left(crypto_hash_xof('blake3', 'abc', 64)::VARCHAR, 20);
+----
+true
+
+# Works on lists like crypto_hash()
+query I
+SELECT crypto_hash_xof('shake256', [1, 2, 3], 64) = crypto_hash('shake256', [1, 2, 3]);
+----
+true
+
+query I
+SELECT crypto_hash_xof('shake256', 'abc', NULL) IS NULL AND crypto_hash_xof('shake256', NULL::VARCHAR, 10) IS NULL;
+----
+true
+
+statement error
+SELECT crypto_hash_xof('sha2-256', 'abc', 32);
+----
+Invalid Input Error: crypto_hash_xof requires an extendable-output algorithm (blake3, shake128, shake256), got 'sha2-256'
+
+statement error
+SELECT crypto_hash_xof('shake128', 'abc', 0);
+----
+Invalid Input Error: crypto_hash_xof length must be between 1 and 4294967295 bytes
+
+statement error
+SELECT crypto_hash_xof('shake128', 'abc', 4294967296);
+----
+Invalid Input Error: crypto_hash_xof length must be between 1 and 4294967295 bytes

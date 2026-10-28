@@ -1,0 +1,32 @@
+# name: test/sql/crypto_json.test
+# description: JSON values are hashed by content, not by the address of their string data
+# group: [crypto]
+
+require crypto
+
+require json
+
+statement ok
+CREATE TABLE docs AS SELECT ('{"id":' || i || '}')::JSON AS doc FROM range(3000) r(i);
+
+# Every row is hashed from its content, never from a pointer to it
+query I
+SELECT count(*) FROM docs WHERE crypto_hash('sha2-256', doc) != crypto_hash('sha2-256', doc::VARCHAR);
+----
+0
+
+query I
+SELECT crypto_hash('sha2-256', '{"a":1}'::JSON) = crypto_hash('sha2-256', '{"a":1}');
+----
+true
+
+query I
+SELECT crypto_hash('sha2-256', ['{"a":1}'::JSON]) = crypto_hash('sha2-256', ['{"a":1}']);
+----
+true
+
+query I
+SELECT crypto_hash_agg('sha2-256', j ORDER BY j) = crypto_hash('sha2-256', ['{"a":1}', '{"b":2}'])
+FROM (VALUES ('{"b":2}'::JSON), ('{"a":1}'::JSON)) t(j);
+----
+true

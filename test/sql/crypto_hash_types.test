@@ -1,0 +1,179 @@
+# name: test/sql/crypto_hash_types.test
+# description: Canonical, platform-independent hashing of DuckDB types
+# group: [crypto]
+
+require crypto
+
+# Types stored as strings are hashed by content, so the result is deterministic
+# =============================================================================
+
+statement ok
+CREATE TYPE email AS VARCHAR;
+
+query I
+SELECT crypto_hash('sha2-256', 'a@example.com'::email) = crypto_hash('sha2-256', 'a@example.com');
+----
+true
+
+query I
+SELECT crypto_hash('sha2-256', 'abc' COLLATE nocase) = crypto_hash('sha2-256', 'abc');
+----
+true
+
+# BIT is hashed from its stored bytes, deterministically
+query I
+SELECT count(DISTINCT crypto_hash('sha2-256', '101010'::BIT)) FROM range(5000);
+----
+1
+
+query I
+SELECT crypto_hash('sha2-256', '101010'::BIT) != crypto_hash('sha2-256', '101011'::BIT);
+----
+true
+
+# UUID: the 16 bytes in RFC 9562 order
+# ===================================
+
+query I
+SELECT crypto_hash('sha2-256', UUID '550e8400-e29b-41d4-a716-446655440000') = crypto_hash('sha2-256', unhex('550e8400e29b41d4a716446655440000'));
+----
+true
+
+query I
+SELECT crypto_hash('blake3', UUID '550e8400-e29b-41d4-a716-446655440000') = crypto_hash('blake3', unhex('550e8400e29b41d4a716446655440000'));
+----
+true
+
+# DECIMAL: the unscaled value as a 16-byte little-endian integer, independent of the declared width
+# ===============================================================================================
+
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 1.00::DECIMAL(4,2))));
+----
+be3a4e82533a10e8145e88960f7991d5f9978e69708ed1878696eb8828eb8f27
+
+query IIII
+SELECT crypto_hash('sha2-256', 1.00::DECIMAL(4,2)) = crypto_hash('sha2-256', 1.00::DECIMAL(9,2)),
+       crypto_hash('sha2-256', 1.00::DECIMAL(4,2)) = crypto_hash('sha2-256', 1.00::DECIMAL(18,2)),
+       crypto_hash('sha2-256', 1.00::DECIMAL(4,2)) = crypto_hash('sha2-256', 1.00::DECIMAL(38,2)),
+       crypto_hash('sha2-256', 1.00::DECIMAL(4,2)) = crypto_hash('sha2-256', 100::HUGEINT);
+----
+true	true	true	true
+
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', -123.45::DECIMAL(18,2))));
+----
+5a8d81e59718af23f7664b9d0069b564d44c70dcc4a9549a6cf80b05172189cf
+
+query I
+SELECT crypto_hash('sha2-256', [-123.45::DECIMAL(5,2)]) = crypto_hash('sha2-256', [-123.45::DECIMAL(30,2)]);
+----
+true
+
+# ENUM: the label, so the hash does not change when the enum is redefined
+# =======================================================================
+
+statement ok
+CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');
+
+statement ok
+CREATE TYPE mood_reordered AS ENUM ('happy', 'ok', 'sad');
+
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', 'happy'::mood)));
+----
+489f719cadf919094ddb38e7654de153ac33c02febb5de91e5345cbe372cf4a0
+
+query II
+SELECT crypto_hash('sha2-256', 'happy'::mood) = crypto_hash('sha2-256', 'happy'::mood_reordered),
+       crypto_hash('sha2-256', 'happy'::mood) = crypto_hash('sha2-256', 'happy');
+----
+true	true
+
+# Inside lists, enum labels are length-prefixed like strings
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', ['happy'::mood, 'sad'::mood])));
+----
+d7a3280169a509318e5aad5ec5709e34ddaff318c39fc22cf8bf615f737ba488
+
+query I
+SELECT crypto_hash('sha2-256', ['happy'::mood, 'sad'::mood]) = crypto_hash('sha2-256', ['happy', 'sad']);
+----
+true
+
+# Other fixed-width types are hashed as little-endian bytes
+# ========================================================
+
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', INTERVAL '1 month 2 days 3 seconds')));
+----
+d300d42e0402edca230ffb32e2a1e18c48c9f4aeb0ca4701a84a6eeb6729458c
+
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', [true, false, true])));
+----
+85f90dfea1d8027e1463e5ca971a250110a20df0119d204a74220bc63516d15b
+
+query I
+SELECT octet_length(crypto_hash('sha2-256', TIMESTAMPTZ '2024-01-01 00:00:00+00'));
+----
+32
+
+query I
+SELECT octet_length(crypto_hash('sha2-256', TIMETZ '12:00:00+01'));
+----
+32
+
+# ARRAY is hashed the same as the equivalent LIST
+# ===============================================
+
+query I
+SELECT lower(to_hex(crypto_hash('sha2-256', [1, 2, 3]::INTEGER[3])));
+----
+4636993d3e1da4e9d6b8f87b79e8f7c6d018580d52661950eabc3845c5897a4d
+
+query I
+SELECT crypto_hash('sha2-256', [1, 2, 3]::INTEGER[3]) = crypto_hash('sha2-256', [1, 2, 3]::INTEGER[]);
+----
+true
+
+query I
+SELECT crypto_hash('blake3', ['ab', 'c']::VARCHAR[2]) = crypto_hash('blake3', ['ab', 'c']::VARCHAR[]);
+----
+true
+
+statement ok
+CREATE TABLE arrays AS SELECT i, [i, i + 1]::BIGINT[2] AS a FROM range(5000) r(i);
+
+query I
+SELECT count(*) FROM arrays WHERE crypto_hash('sha2-256', a) != crypto_hash('sha2-256', [i, i + 1]::BIGINT[]);
+----
+0
+
+query I
+SELECT crypto_hash('sha2-256', NULL::INTEGER[3]) IS NULL;
+----
+true
+
+statement error
+SELECT crypto_hash('sha2-256', [1, NULL, 3]::INTEGER[3]);
+----
+Unsupported type for crypto_hash: NULL elements inside lists are not supported
+
+statement error
+SELECT crypto_hash('sha2-256', [[1, 2], [3, 4]]::INTEGER[2][2]);
+----
+Invalid Input Error: Unsupported type for crypto_hash: nested types inside of lists are not supported
+
+# Unsupported types
+# =================
+
+statement error
+SELECT crypto_hash('sha2-256', union_value(num := 2)::UNION(num INTEGER, str VARCHAR));
+----
+Invalid Input Error: Unsupported type for crypto_hash
+
+statement error
+SELECT crypto_hash('sha2-256', 42::VARIANT);
+----
+Invalid Input Error: Unsupported type for crypto_hash

@@ -87,28 +87,32 @@ SELECT lower(to_hex(crypto_hash('sha1', 'abc')));
 ----
 a9993e364706816aba3e25717850c26c9cd0d89d
 
-# Note: MD4 is deprecated and often disabled in modern OpenSSL builds, so we skip testing it
+# MD4 is only in OpenSSL's legacy provider, so it is reported as unavailable instead of failing at runtime
+statement error
+SELECT crypto_hash('md4', 'abc');
+----
+Invalid Input Error: Hash algorithm 'md4' is not available in the linked OpenSSL library
 
-# Test Keccak variants (note: these map to SHA3 in OpenSSL)
+# Test Keccak variants: original Keccak padding (as used by Ethereum), which differs from SHA3
 query I
 SELECT lower(to_hex(crypto_hash('keccak224', 'abc')));
 ----
-e642824c3f8cf24ad09234ee7d3c766fc9a3a5168d0c94ad73b46fdf
+c30411768506ebe1c2871b1ee2e87d38df342317300a9b97a95ec6a8
 
 query I
 SELECT lower(to_hex(crypto_hash('keccak256', 'abc')));
 ----
-3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532
+4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45
 
 query I
 SELECT lower(to_hex(crypto_hash('keccak384', 'abc')));
 ----
-ec01498288516fc926459f58e2c6ad8df9b473cb0fc08c2596da7cf0e49be4b298d88cea927ac7f539f1edf228376d25
+f7df1165f033337be098e7d288ad6a2f74409d7a60b49c36642218de161b1f99f8c681e4afaf31a34db29fb763e3c28e
 
 query I
 SELECT lower(to_hex(crypto_hash('keccak512', 'abc')));
 ----
-b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0
+18587dc2ea106b9a1563e32b3312421ca164c7f1f07bc922a9c83d77cea3a1e5d0c69910739025372dc14ac9642629379540c17e2a65b19d77aa511a9d00bb96
 
 # Test empty string input
 query I
@@ -315,11 +319,11 @@ SELECT lower(to_hex(crypto_hash('sha2-256', TIMESTAMP '2024-01-01 12:00:00')));
 ----
 17d836195a05b117e0c249c3d365e22f3e3d31ae80e50245efa7e245daa518f5
 
-# Test with UUID type
+# Test with UUID type: hashed as its 16 bytes in RFC 9562 order
 query I
 SELECT lower(to_hex(crypto_hash('sha2-256', UUID '550e8400-e29b-41d4-a716-446655440000')));
 ----
-9061bd82032ce8cda67b72e44b0cde0e5c35e89b15dabf765ed50b4670c190d1
+cee82307e6ad54d90eef435cad081ccf590f5cc3a22bb5ef3941091d781fcd14
 
 # Test with BLOB type (should still work)
 query I
@@ -625,7 +629,7 @@ SELECT lower(to_hex(crypto_hash('blake3', TIMESTAMP '2024-01-01 12:00:00')));
 query I
 SELECT lower(to_hex(crypto_hash('blake3', UUID '550e8400-e29b-41d4-a716-446655440000')));
 ----
-14fb70679b3e5ef7761b8b98fdc345d22f7752eae43457ef423de747798f8ed8
+ee033ae39927baa3d15cce6f4276add23cce481ea438a2db74498a4d5a0c977d
 
 # Test Blake3 with BLOB type
 query I
@@ -832,7 +836,7 @@ FROM (VALUES (100::BIGINT), (200::BIGINT), (300::BIGINT)) t(value);
 # Test aggregate with DOUBLE data
 query I
 SELECT lower(to_hex(crypto_hash_agg('sha2-256', value ORDER BY value)))
-FROM (VALUES (1.5), (2.5), (3.5)) t(value);
+FROM (VALUES (1.5::DOUBLE), (2.5::DOUBLE), (3.5::DOUBLE)) t(value);
 ----
 ad1461355d664226df0a9dd36082ce06afa03d52a19beb8e90853216ef6b221e
 

@@ -1,0 +1,120 @@
+# name: test/sql/crypto_hmac_equals.test
+# description: crypto_hmac() with BLOB keys and messages, key reuse across rows, and crypto_equals()
+# group: [crypto]
+
+require crypto
+
+# BLOB keys and messages
+# ======================
+
+# RFC 4231 test case 1
+query I
+SELECT lower(to_hex(crypto_hmac('sha2-256', unhex('0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b'), 'Hi There')));
+----
+b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+
+query I
+SELECT lower(to_hex(crypto_hmac('sha2-256', unhex('0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b'), 'Hi There'::BLOB)));
+----
+b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+
+query I
+SELECT lower(to_hex(crypto_hmac('sha2-512/256', unhex('000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'), unhex('0001ff'))));
+----
+e97e683d9878460eb5bff228155ba730e278c81fde9bbea2584bd6e58012e440
+
+# A key from crypto_random_bytes() can be used directly
+query I
+SELECT octet_length(crypto_hmac('sha2-256', crypto_random_bytes(32), 'message'));
+----
+32
+
+query I
+SELECT octet_length(crypto_hmac('blake3', crypto_random_bytes(32), 'message'));
+----
+32
+
+# A VARCHAR key is used verbatim (backslashes are not BLOB escapes)
+query I
+SELECT crypto_hmac('sha2-256', '\x41', 'm') != crypto_hmac('sha2-256', 'A', 'm');
+----
+true
+
+# NULL in any argument gives NULL, without overload ambiguity
+query III
+SELECT crypto_hmac('md5', NULL, 'x') IS NULL, crypto_hmac('md5', 'k', NULL) IS NULL, crypto_hmac(NULL, 'k', 'x') IS NULL;
+----
+true	true	true
+
+# HMAC with real Keccak (block size 136)
+query I
+SELECT lower(to_hex(crypto_hmac('keccak256', 'key', 'message')));
+----
+bba60584ee1419bad2e48837058f6c4632ea1f3d3303fdfbeb807fa3c6184cdc
+
+statement error
+SELECT crypto_hmac('shake128', 'key', 'message');
+----
+Invalid Input Error: Hash algorithm 'shake128' cannot be used with crypto_hmac
+
+# Keys, messages and algorithms that change between rows
+# ======================================================
+
+query II
+SELECT i, lower(to_hex(crypto_hmac(alg, k, m)))
+FROM (VALUES (1, 'sha2-256', 'key1', 'a'), (2, 'sha2-256', 'key2', 'b'), (3, 'sha2-256', 'key1', 'c'),
+             (4, 'md5', 'key1', 'a'), (5, 'sha2-256', '', 'm'), (6, 'sha2-256', 'key1', 'a')) t(i, alg, k, m)
+ORDER BY i;
+----
+1	f2f2566cc3ef1ea506a62e40b4e07aa0e4ee4715700d02dc0bdeef81f3552a05
+2	3c809d6416a6d69b26280ebdf642e3176e0dc1e6de19b3f89433abfbf345e856
+3	b3a82128724c72fe89f2de5c86b57d8b2a65097ce5351fa9b9a8a123bc44fdf8
+4	fa4323edbf5c425c36dbb12937b7602d
+5	a64092104c76d9ef65599c33c177609ecd49857456eb28133c4daea25bea960a
+6	f2f2566cc3ef1ea506a62e40b4e07aa0e4ee4715700d02dc0bdeef81f3552a05
+
+# A constant key reused over many rows gives the same result as computing each row on its own
+statement ok
+CREATE TABLE messages AS SELECT i, 'message ' || i AS m FROM range(10000) r(i);
+
+query I
+SELECT count(*) FROM messages
+WHERE crypto_hmac('sha2-256', 'shared key', m) != crypto_hmac('sha2-256', 'key ' || (i % 3), m)
+  AND i % 3 = 0;
+----
+3334
+
+query I
+SELECT count(DISTINCT crypto_hmac('sha2-256', 'shared key', m)) FROM messages;
+----
+10000
+
+query I
+SELECT count(*) FROM messages
+WHERE crypto_hmac('sha2-256', 'k' || (i % 7), m) != crypto_hmac('sha2-256', ('k' || (i % 7))::BLOB, m::BLOB);
+----
+0
+
+# crypto_equals
+# =============
+
+query IIII
+SELECT crypto_equals('abc', 'abc'), crypto_equals('abc', 'abd'), crypto_equals('abc', 'abcd'), crypto_equals('', '');
+----
+true	false	false	true
+
+query II
+SELECT crypto_equals(crypto_hmac('sha2-256', 'k', 'm'), crypto_hmac('sha2-256', 'k', 'm')),
+       crypto_equals(crypto_hmac('sha2-256', 'k', 'm'), crypto_hmac('sha2-256', 'k', 'n'));
+----
+true	false
+
+query II
+SELECT crypto_equals('\x01\x02'::BLOB, unhex('0102')), crypto_equals('A', unhex('41'));
+----
+true	true
+
+query I
+SELECT crypto_equals(NULL, 'abc') IS NULL;
+----
+true

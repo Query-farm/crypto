@@ -12,7 +12,7 @@
 [![DuckDB](https://img.shields.io/badge/DuckDB-extension-fdf1e0?logo=duckdb&logoColor=fff000)](https://query.farm/products/extensions/crypto/)
 [![v2.0 build](https://github.com/Query-farm/crypto/actions/workflows/MainDistributionPipeline.yml/badge.svg?branch=v2.0)](https://github.com/Query-farm/crypto/actions/workflows/MainDistributionPipeline.yml?query=branch%3Av2.0)
 
-Compute cryptographic hashes and HMACs, and generate secure random bytes in DuckDB.
+Compute cryptographic hashes and HMACs, derive keys (PBKDF2, HKDF, scrypt, Argon2), and generate secure random bytes in DuckDB.
 
 ## Documentation
 

@@ -1,0 +1,10 @@
+# name: test/sql/crypto_random_large.test_slow
+# description: crypto_random_bytes() beyond INT_MAX bytes, which RAND_bytes cannot fill in one call
+# group: [crypto]
+
+require crypto
+
+query I
+SELECT octet_length(crypto_random_bytes(2500000000));
+----
+2500000000

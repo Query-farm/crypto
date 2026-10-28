@@ -6,13 +6,20 @@ require crypto
 
 query II
 SELECT DISTINCT function_name, parameters FROM duckdb_functions()
-WHERE function_name IN ('crypto_hash', 'crypto_hash_agg', 'crypto_hmac', 'crypto_random_bytes')
+WHERE function_name LIKE 'crypto\_%' ESCAPE '\'
 ORDER BY ALL;
 ----
+crypto_algorithms	[]
+crypto_argon2	[variant, password, salt, iterations, memory_kib, parallelism, length]
+crypto_equals	[a, b]
 crypto_hash	[algorithm, value]
 crypto_hash_agg	[algorithm, value]
+crypto_hash_xof	[algorithm, value, length]
+crypto_hkdf	[algorithm, key, salt, info, length]
 crypto_hmac	[algorithm, key, message]
+crypto_pbkdf2	[algorithm, password, salt, iterations, length]
 crypto_random_bytes	[length]
+crypto_scrypt	[password, salt, n, r, p, length]
 
 # The parameters are still positional: calls work as before
 
